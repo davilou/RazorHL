@@ -22,6 +22,7 @@ from bot.logger import setup_logger, set_debug, get_logger
 from bot.exchanges.base import BaseExchangeClient
 from bot.exchanges.factory import create_exchange_client
 from bot.exchanges.binance_ws import BinanceCandleManager
+from bot.exchanges.lighter_ws import LighterCandleManager
 from bot.indicators import compute_all
 from bot.strategies.manager import evaluate_all, get_required_timeframes, get_active_assets
 from bot.executor import open_position, close_position
@@ -32,7 +33,7 @@ log = get_logger("main")
 # Global state
 client: BaseExchangeClient = create_exchange_client()
 risk_mgr: RiskManager | None = None
-candle_mgr: BinanceCandleManager | None = None
+candle_mgr: BinanceCandleManager | LighterCandleManager | None = None
 _stop_event = threading.Event()
 _bot_thread: threading.Thread | None = None
 _asset_live_status: dict[str, dict] = {}
@@ -105,8 +106,21 @@ def bot_loop():
 
     active_intervals = get_required_timeframes()
     log.info(f"Active strategy timeframes: {active_intervals}")
-    candle_mgr = BinanceCandleManager(initial_assets, on_candle_close=on_candle_close,
-                                      intervals=active_intervals)
+    selected_exchange = cfg.get("selected_exchange", "lighter")
+    use_lighter_ws = (cfg.get("use_lighter_ws_candles", "true").lower() == "true")
+
+    if selected_exchange == "lighter" and use_lighter_ws:
+        log.info("Using LighterCandleManager (native WS) for candle feed")
+        candle_mgr = LighterCandleManager(
+            client=client,
+            assets=initial_assets,
+            intervals=active_intervals,
+            on_candle_close=on_candle_close,
+        )
+    else:
+        log.info(f"Using BinanceCandleManager (exchange={selected_exchange}, ws_flag={use_lighter_ws})")
+        candle_mgr = BinanceCandleManager(initial_assets, on_candle_close=on_candle_close,
+                                          intervals=active_intervals)
     candle_mgr.start()
 
     _heartbeat_counter = 0
