@@ -314,29 +314,6 @@ class TestBoundaryFallback:
         client.get_candles.assert_called()
         assert mgr._queue.qsize() == 1
 
-    def test_active_channel_skips_rest(self):
-        # WS empurrando mensagens recentes para o canal (mesmo que sejam updates
-        # do candle antigo) → não dispara fallback. WS está vivo, vai emitir close
-        # via _on_message quando a primeira trade do novo candle chegar.
-        import time as _time
-        cb = MagicMock()
-        client = _mk_client()
-        mgr = LighterCandleManager(
-            client=client,
-            assets=["BTC"],
-            intervals=["5m"],
-            on_candle_close=cb,
-        )
-        mgr._subscriptions = {("BTC", "5m"): 0}
-        # Sinaliza que canal recebeu mensagem agora (dentro do threshold)
-        mgr._channel_last_msg_ts[("BTC", "5m")] = _time.time()
-
-        boundary_ms = 1700000300000
-        mgr._check_boundary_fallback(boundary_ms, "5m")
-
-        client.get_candles.assert_not_called()
-        assert mgr._queue.qsize() == 0
-
     def test_already_emitted_skips_rest(self):
         # _on_message já emitiu o close via WS push do novo t → boundary fallback
         # respeita o dedup e não chama REST.

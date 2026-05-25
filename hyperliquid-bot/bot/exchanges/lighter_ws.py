@@ -120,12 +120,9 @@ log = get_logger(__name__)
 
 _QUEUE_MAXSIZE = 50
 _SEED_COUNT = 500
-_BOUNDARY_MARGIN_MS = 5000   # wait 5s past boundary so WS has priority before REST fallback fires
-                              # (2s was too short for low-volume assets whose first trade in the
-                              # new candle takes 3-5s to arrive)
-_CHANNEL_SILENT_THRESHOLD_S = 10.0  # boundary fallback fires only if the channel got no WS
-                                     # message at all in this many seconds (wall clock).
-                                     # Old candle updates still count — they prove WS is alive.
+_BOUNDARY_MARGIN_MS = 5000   # wait 5s past boundary then fire REST fallback for any
+                              # (asset, tf) whose close wasn't yet emitted by WS. Caps
+                              # latency at ~5s; WS dedup avoids duplicate emits.
 
 
 class LighterCandleManager:
@@ -167,10 +164,6 @@ class LighterCandleManager:
         self._last_msg_ts: float = 0.0
         self._ts_lock = threading.Lock()
         self._last_update_ms: dict[tuple[str, str], int] = {}
-        # Wall-clock time.time() of the last WS message for each channel.
-        # Used by boundary fallback to skip channels where WS is actively delivering
-        # (even if updates are still for the previous candle — they confirm WS is alive).
-        self._channel_last_msg_ts: dict[tuple[str, str], float] = {}
 
         # subscriptions: (asset, tf) → market_id
         self._subscriptions: dict[tuple[str, str], int] = {}
@@ -348,7 +341,6 @@ class LighterCandleManager:
 
         key = (asset, interval)
         is_snapshot = msg_type == "subscribed/candle"
-        self._channel_last_msg_ts[key] = time.time()
 
         # Para snapshot inicial pode vir múltiplas velas; aplica todas sem emitir
         # evento. Para update, sempre processa a última.
@@ -534,31 +526,26 @@ class LighterCandleManager:
         log.candle("LighterCandleManager: reconnected.")
 
     def _check_boundary_fallback(self, boundary_ms: int, interval: str) -> None:
-        """For every subscribed (asset, interval), check if the WS channel went
-        silent (no message at all in the last _CHANNEL_SILENT_THRESHOLD_S seconds)
-        AND we haven't yet emitted the close that's now due. If both, force REST.
+        """For every subscribed (asset, interval), fire REST + emit close if it
+        wasn't already emitted via the WS push path.
 
-        We do NOT use `_last_update_ms` here: that field tracks the OPEN timestamp
-        of the candle being updated, which lags the boundary because Lighter keeps
-        publishing trades on the OLD candle for a few seconds past the boundary
-        (delayed aggregation). The wall-clock `_channel_last_msg_ts` is a much
-        better proxy for "is WS alive for this channel".
+        Why we DON'T try to be clever about "is WS active for this channel":
+        We tried gating on `_channel_last_msg_ts` (skip if any WS msg arrived
+        within 10s). Result: low-volume assets that had stray old-candle
+        updates within the threshold got their close emitted via WS at +30-70s
+        (PUMP at +58s, WLD at +67s observed) — unacceptable for a scalping bot.
+        Cap latency by firing fallback at `_BOUNDARY_MARGIN_MS` post-boundary
+        for ANY (asset, tf) whose close is not yet emitted. WS dedup
+        (`_last_emitted_t`) ensures we never emit the same close twice.
         """
         prev_t = boundary_ms - _INTERVAL_MS[interval]
-        now = time.time()
         for (asset, tf), _ in list(self._subscriptions.items()):
             if tf != interval:
                 continue
 
-            # Skip if WS already emitted this close (covered by _on_message dedup)
             last_emitted = getattr(self, "_last_emitted_t", {}).get((asset, tf), 0)
             if last_emitted >= prev_t:
-                continue
-
-            # Skip if WS is delivering messages for this channel (any msg recent)
-            last_msg = self._channel_last_msg_ts.get((asset, tf), 0.0)
-            if now - last_msg < _CHANNEL_SILENT_THRESHOLD_S:
-                continue  # WS healthy for this channel — trust it to emit eventually
+                continue  # WS already emitted via _on_message
 
             try:
                 df = self._client.get_candles(asset, tf, count=2)
@@ -577,6 +564,6 @@ class LighterCandleManager:
             self._last_emitted_t[(asset, tf)] = prev_t
             try:
                 self._queue.put_nowait((asset, tf))
-                log.candle(f"[{asset}] {tf} boundary fallback fired (WS silent)")
+                log.candle(f"[{asset}] {tf} boundary fallback fired")
             except queue.Full:
                 pass
