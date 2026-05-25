@@ -117,3 +117,70 @@ class TestManagerLifecycle:
         assert mgr._paused is True
         mgr.resume()
         assert mgr._paused is False
+
+
+import json
+
+
+def _build_mgr(callback=None):
+    mgr = LighterCandleManager(
+        client=_mk_client(),
+        assets=["BTC", "ETH"],
+        intervals=["5m"],
+        on_candle_close=callback or MagicMock(),
+    )
+    # Simula que os subscribes já foram feitos
+    mgr._subscriptions = {("BTC", "5m"): 0, ("ETH", "5m"): 1}
+    return mgr
+
+
+def _msg(channel: str, candles: list[dict], msg_type: str = "update/candle") -> str:
+    return json.dumps({
+        "type": msg_type,
+        "channel": channel,
+        "timestamp": 1700000005000,
+        "candles": candles,
+    })
+
+
+class TestOnMessage:
+    def test_update_same_t_does_not_emit(self):
+        cb = MagicMock()
+        mgr = _build_mgr(cb)
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000000000, c=1.0)]))
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000000000, c=2.0)]))
+        assert mgr._queue.qsize() == 0  # nenhum evento de close
+
+    def test_update_new_t_enqueues_close(self):
+        cb = MagicMock()
+        mgr = _build_mgr(cb)
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000000000)]))
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000300000)]))
+        assert mgr._queue.qsize() == 1
+        item = mgr._queue.get_nowait()
+        assert item == ("BTC", "5m")
+
+    def test_subscribed_snapshot_does_not_emit(self):
+        cb = MagicMock()
+        mgr = _build_mgr(cb)
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000000000)], msg_type="subscribed/candle"))
+        assert mgr._queue.qsize() == 0
+        # Mas o buffer deve estar populado
+        assert ("BTC", "5m") in mgr._buffer
+        assert len(mgr._buffer[("BTC", "5m")]) == 1
+
+    def test_unknown_channel_ignored(self):
+        cb = MagicMock()
+        mgr = _build_mgr(cb)
+        # Channel ticker/ não está em _subscriptions → ignora silenciosamente
+        mgr._on_message(None, _msg("ticker:0", [_row(1700000000000)]))
+        assert mgr._queue.qsize() == 0
+
+    def test_dedup_no_duplicate_emit_same_close(self):
+        # Se o WS reenviar o mesmo close por algum motivo, não duplica
+        cb = MagicMock()
+        mgr = _build_mgr(cb)
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000000000)]))
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000300000)]))
+        mgr._on_message(None, _msg("candle:0:5m", [_row(1700000300000)]))  # repete
+        assert mgr._queue.qsize() == 1  # ainda 1

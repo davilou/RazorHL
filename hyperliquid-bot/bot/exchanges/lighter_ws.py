@@ -5,7 +5,9 @@ Substitui o BinanceCandleManager no caminho Lighter. Usa o canal nativo
 a cada trade. Detecta candle close por mudança do campo `t` (timestamp).
 """
 
+import json
 import re
+import time
 
 _WS_URL_MAINNET = "wss://mainnet.zklighter.elliot.ai/stream"
 _WS_URL_TESTNET = "wss://testnet.zklighter.elliot.ai/stream"
@@ -202,3 +204,71 @@ class LighterCandleManager:
     def get_candles(self, asset: str, interval: str, count: int = 100) -> pd.DataFrame:
         """Read last `count` candles from buffer. Wired in Task 6."""
         raise NotImplementedError("Wired in Task 6")
+
+    def _market_to_asset(self, market_id: int, interval: str) -> str | None:
+        """Reverse lookup market_id → asset via _subscriptions map."""
+        for (asset, tf), mid in self._subscriptions.items():
+            if mid == market_id and tf == interval:
+                return asset
+        return None
+
+    def _on_message(self, ws, raw: str) -> None:
+        with self._ts_lock:
+            self._last_msg_ts = time.time()
+
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+
+        msg_type = msg.get("type", "")
+        if not msg_type.endswith("/candle"):
+            return
+
+        channel = msg.get("channel", "")
+        parsed = _parse_channel(channel)
+        if parsed is None:
+            return
+        market_id, interval = parsed
+
+        asset = self._market_to_asset(market_id, interval)
+        if asset is None:
+            return  # canal recebido mas não subscrito (race ou bug)
+
+        candles = msg.get("candles") or []
+        if not candles:
+            return
+
+        key = (asset, interval)
+        is_snapshot = msg_type == "subscribed/candle"
+
+        # Para snapshot inicial pode vir múltiplas velas; aplica todas sem emitir
+        # evento. Para update, sempre processa a última.
+        candles_to_apply = candles if is_snapshot else [candles[-1]]
+
+        for c in candles_to_apply:
+            with self._lock:
+                buf = self._buffer.get(key, pd.DataFrame())
+                new_buf, emitted_close = _apply_candle_update(buf, c)
+                self._buffer[key] = new_buf
+
+            self._last_update_ms[key] = int(c["t"])
+
+            if is_snapshot:
+                continue  # snapshot nunca emite
+
+            if emitted_close and not self._paused:
+                # dedup: só emite se ainda não emitimos esse close
+                last_emitted = getattr(self, "_last_emitted_t", {}).get(key, 0)
+                # O close é da vela ANTERIOR. last_emitted guarda o t da vela
+                # cujo close já anunciamos. Se o t anterior (= incoming - tf) for
+                # > last_emitted, ainda não anunciamos esse close.
+                prev_t = int(c["t"]) - _INTERVAL_MS[interval]
+                if prev_t > last_emitted:
+                    if not hasattr(self, "_last_emitted_t"):
+                        self._last_emitted_t: dict[tuple[str, str], int] = {}
+                    self._last_emitted_t[key] = prev_t
+                    try:
+                        self._queue.put_nowait((asset, interval))
+                    except queue.Full:
+                        pass
