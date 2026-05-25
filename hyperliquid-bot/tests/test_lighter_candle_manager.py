@@ -188,6 +188,17 @@ class TestOnMessage:
         mgr._on_message(None, _msg("candle:0:5m", [_row(1700000300000)]))  # repete
         assert mgr._queue.qsize() == 1  # ainda 1
 
+    def test_ping_triggers_pong_reply(self):
+        # Lighter manda {"type":"ping"} a nível de aplicação; precisamos
+        # responder {"type":"pong"} ou o servidor fecha após ~2min de "inatividade".
+        cb = MagicMock()
+        mgr = _build_mgr(cb)
+        ws = MagicMock()
+        mgr._on_message(ws, json.dumps({"type": "ping"}))
+        ws.send.assert_called_once_with(json.dumps({"type": "pong"}))
+        # ping não deve gerar evento de candle
+        assert mgr._queue.qsize() == 0
+
 
 class TestStart:
     def test_start_seeds_and_spawns_threads(self, monkeypatch):

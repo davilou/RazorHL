@@ -290,6 +290,17 @@ class LighterCandleManager:
             return
 
         msg_type = msg.get("type", "")
+
+        # Lighter sends application-level JSON ping; reply with pong or the
+        # server closes the connection after ~2min of "inactivity" (it does
+        # NOT honor WebSocket control PING frames). See SDK ws_client.py.
+        if msg_type == "ping":
+            try:
+                ws.send(json.dumps({"type": "pong"}))
+            except Exception as e:
+                log.warning(f"Lighter WS pong send failed: {e}")
+            return
+
         if not msg_type.endswith("/candle"):
             return
 
