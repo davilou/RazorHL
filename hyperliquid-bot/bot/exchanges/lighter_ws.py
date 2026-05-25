@@ -8,6 +8,7 @@ a cada trade. Detecta candle close por mudança do campo `t` (timestamp).
 import json
 import re
 import time
+import websocket  # websocket-client (already a dependency, used by binance_ws)
 
 _WS_URL_MAINNET = "wss://mainnet.zklighter.elliot.ai/stream"
 _WS_URL_TESTNET = "wss://testnet.zklighter.elliot.ai/stream"
@@ -194,8 +195,23 @@ class LighterCandleManager:
         log.info("LighterCandleManager: stopped.")
 
     def start(self) -> None:
-        """Wired in Task 5 — seeds buffer, starts WS + worker + watchdog + boundary threads."""
-        raise NotImplementedError("Wired in Task 5")
+        log.info("LighterCandleManager: seeding buffer via REST...")
+        self._seed_buffer()
+        log.info(f"LighterCandleManager: seed complete ({len(self._subscriptions)} subscriptions). Opening WS...")
+        self._stop_event.clear()
+        with self._ts_lock:
+            self._last_msg_ts = time.time()
+
+        self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="lighter-ws")
+        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="lighter-worker")
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="lighter-watchdog")
+        self._boundary_thread = threading.Thread(target=self._boundary_loop, daemon=True, name="lighter-boundary")
+
+        self._ws_thread.start()
+        self._worker_thread.start()
+        self._watchdog_thread.start()
+        self._boundary_thread.start()
+        log.info("LighterCandleManager: started.")
 
     def update_assets(self, new_assets: list[str]) -> None:
         """Wired in Task 8."""
@@ -272,3 +288,114 @@ class LighterCandleManager:
                         self._queue.put_nowait((asset, interval))
                     except queue.Full:
                         pass
+
+    def _resolve_market_id(self, asset: str) -> int | None:
+        try:
+            market = self._client._client.get_market(asset)
+        except Exception as e:
+            log.warning(f"[{asset}] market lookup failed: {e}")
+            return None
+        if not market:
+            return None
+        return market.get("marketId")
+
+    def _seed_buffer(self) -> None:
+        """Cold start: build (asset, tf) → market_id map and prefill buffers via REST."""
+        for asset in self._assets:
+            market_id = self._resolve_market_id(asset)
+            if market_id is None:
+                log.warning(f"[{asset}] no Lighter market — skipping subscribe")
+                continue
+            for tf in self._intervals:
+                self._subscriptions[(asset, tf)] = market_id
+                try:
+                    df = self._client.get_candles(asset, tf, count=_SEED_COUNT)
+                    if df is not None and not df.empty:
+                        with self._lock:
+                            self._buffer[(asset, tf)] = df.copy()
+                        last_ts = int(df.iloc[-1]["timestamp"]) if "timestamp" in df.columns else 0
+                        self._last_update_ms[(asset, tf)] = last_ts
+                except Exception as e:
+                    log.warning(f"[{asset}] seed {tf} failed: {e}")
+
+    def _on_open(self, ws) -> None:
+        """Send subscribes for all (asset, tf) pairs in self._subscriptions."""
+        for (asset, tf), market_id in self._subscriptions.items():
+            sub = {"type": "subscribe", "channel": f"candle/{market_id}/{tf}"}
+            try:
+                ws.send(json.dumps(sub))
+            except Exception as e:
+                log.warning(f"[{asset}] subscribe {tf} failed: {e}")
+
+    def _on_error(self, ws, error) -> None:
+        log.error(f"Lighter WS error: {error}")
+
+    def _on_close(self, ws, code, msg) -> None:
+        log.warning(f"Lighter WS closed (code={code})")
+
+    def _run_ws(self) -> None:
+        self._ws = websocket.WebSocketApp(
+            self._ws_url,
+            on_open=self._on_open,
+            on_message=self._on_message,
+            on_error=self._on_error,
+            on_close=self._on_close,
+        )
+        self._ws.run_forever(ping_interval=90, ping_timeout=15)
+
+    def _safe_callback(self, asset: str, interval: str) -> None:
+        try:
+            self._on_candle_close(asset, interval)
+        except Exception as e:
+            log.error(f"[{asset}] on_candle_close error: {e}", exc_info=True)
+
+    def _worker_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                first = self._queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            if self._paused:
+                continue
+            items = [first]
+            while True:
+                try:
+                    items.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+            for asset, interval in items:
+                self._executor.submit(self._safe_callback, asset, interval)
+
+    def _watchdog_loop(self) -> None:
+        """Reconnect if WS silent for >90s (Task 7 expands this)."""
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(30):
+                break
+            with self._ts_lock:
+                elapsed = time.time() - self._last_msg_ts
+            if elapsed > 90:
+                log.warning(f"Lighter WS silent for {elapsed:.0f}s — reconnect")
+                self._reconnect()
+
+    def _boundary_loop(self) -> None:
+        """Per-TF backup: REST fetch for subscribed (asset, tf) that received
+        no WS update in the last completed boundary window.
+        Wired fully in Task 7 (basic loop here so the thread is alive).
+        """
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(30):
+                break
+
+    def _reconnect(self) -> None:
+        """Close current WS and respawn thread. Resubscribes via _on_open."""
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+        time.sleep(1)
+        self._ws_thread = threading.Thread(target=self._run_ws, daemon=True, name="lighter-ws")
+        self._ws_thread.start()
+        with self._ts_lock:
+            self._last_msg_ts = time.time()
+        log.info("LighterCandleManager: reconnected.")

@@ -184,3 +184,47 @@ class TestOnMessage:
         mgr._on_message(None, _msg("candle:0:5m", [_row(1700000300000)]))
         mgr._on_message(None, _msg("candle:0:5m", [_row(1700000300000)]))  # repete
         assert mgr._queue.qsize() == 1  # ainda 1
+
+
+class TestStart:
+    def test_start_seeds_and_spawns_threads(self, monkeypatch):
+        cb = MagicMock()
+        client = _mk_client()
+        # get_candles returns translated columns (timestamp, open, high, low, close, volume)
+        # with a datetime index — same shape as _apply_candle_update output
+        raw = {"timestamp": 1700000000000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 0.0}
+        sample_df = pd.DataFrame([raw])
+        sample_df["datetime"] = pd.to_datetime(sample_df["timestamp"], unit="ms", utc=True)
+        sample_df.set_index("datetime", inplace=True)
+        client.get_candles.return_value = sample_df
+
+        # Stub do WebSocketApp para não conectar de verdade.
+        # run_forever precisa bloquear até stop() ser chamado para que
+        # _ws_thread fique vivo durante as asserções.
+        import threading as _threading
+        import bot.exchanges.lighter_ws as mod
+        _ws_block = _threading.Event()
+        ws_app_mock = MagicMock()
+        ws_app_mock.run_forever = lambda **kw: _ws_block.wait()
+        ws_app_mock.close = lambda: _ws_block.set()
+        monkeypatch.setattr(mod.websocket, "WebSocketApp", lambda *a, **kw: ws_app_mock)
+
+        mgr = LighterCandleManager(
+            client=client,
+            assets=["BTC"],
+            intervals=["5m"],
+            on_candle_close=cb,
+        )
+        mgr.start()
+        try:
+            # subscribes registrados
+            assert ("BTC", "5m") in mgr._subscriptions
+            # buffer seedado (sample_df foi consumido)
+            assert ("BTC", "5m") in mgr._buffer
+            # threads vivas
+            assert mgr._ws_thread is not None and mgr._ws_thread.is_alive()
+            assert mgr._worker_thread is not None and mgr._worker_thread.is_alive()
+            assert mgr._watchdog_thread is not None and mgr._watchdog_thread.is_alive()
+            assert mgr._boundary_thread is not None and mgr._boundary_thread.is_alive()
+        finally:
+            mgr.stop()
