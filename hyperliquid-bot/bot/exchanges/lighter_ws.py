@@ -104,3 +104,101 @@ def _apply_candle_update(
     new_buf = pd.concat([buffer, new_row])
     new_buf = new_buf[~new_buf.index.duplicated(keep="last")].sort_index()
     return new_buf, True
+
+
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
+
+from bot.logger import get_logger
+
+log = get_logger(__name__)
+
+_QUEUE_MAXSIZE = 50
+_SEED_COUNT = 500
+
+
+class LighterCandleManager:
+    """Live candle streaming from Lighter native WebSocket.
+
+    Threading model (matches BinanceCandleManager):
+    - _ws_thread:        WebSocket reader, parses messages, updates buffer
+    - _worker_thread:    drains queue and dispatches to thread pool
+    - _watchdog_thread:  monitors global silence, reconnects
+    - _boundary_thread:  fires per-TF boundary REST fallback for silent channels
+
+    Callback signature: on_candle_close(asset: str, interval: str) -> None
+    """
+
+    def __init__(
+        self,
+        client,
+        assets: list[str],
+        on_candle_close: Callable[[str, str], None],
+        intervals: list[str] | None = None,
+        ws_url: str = _WS_URL_MAINNET,
+    ):
+        self._client = client
+        self._assets = list(assets)
+        self._on_candle_close = on_candle_close
+        self._intervals: list[str] = list(intervals) if intervals else ["5m"]
+        self._ws_url = ws_url
+
+        self._buffer: dict[tuple[str, str], pd.DataFrame] = {}
+        self._lock = threading.RLock()
+
+        self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
+        self._paused = False
+        self._stop_event = threading.Event()
+
+        self._ws = None
+        self._last_msg_ts: float = 0.0
+        self._ts_lock = threading.Lock()
+        self._last_update_ms: dict[tuple[str, str], int] = {}
+
+        # subscriptions: (asset, tf) → market_id
+        self._subscriptions: dict[tuple[str, str], int] = {}
+
+        self._ws_thread: threading.Thread | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
+        self._boundary_thread: threading.Thread | None = None
+        self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="lighter-asset-worker")
+
+    @property
+    def intervals(self) -> list[str]:
+        return list(self._intervals)
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        self._paused = False
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+        self._executor.shutdown(wait=False)
+        log.info("LighterCandleManager: stopped.")
+
+    def start(self) -> None:
+        """Wired in Task 5 — seeds buffer, starts WS + worker + watchdog + boundary threads."""
+        raise NotImplementedError("Wired in Task 5")
+
+    def update_assets(self, new_assets: list[str]) -> None:
+        """Wired in Task 8."""
+        raise NotImplementedError("Wired in Task 8")
+
+    def get_candles(self, asset: str, interval: str, count: int = 100) -> pd.DataFrame:
+        """Read last `count` candles from buffer. Wired in Task 6."""
+        raise NotImplementedError("Wired in Task 6")

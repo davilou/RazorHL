@@ -81,3 +81,39 @@ class TestApplyCandleUpdate:
         assert len(df) == 1
         assert df.iloc[-1]["timestamp"] == 1700000300000
         assert emitted is False
+from unittest.mock import MagicMock
+
+from bot.exchanges.lighter_ws import LighterCandleManager
+
+
+def _mk_client():
+    """Mock LighterExchangeClient com get_candles e _client.get_market."""
+    client = MagicMock()
+    client._client.get_market.side_effect = lambda a: {"marketId": {"BTC": 0, "ETH": 1}.get(a)}
+    client.get_candles.return_value = pd.DataFrame()
+    return client
+
+
+class TestManagerLifecycle:
+    def test_construct_does_not_connect(self):
+        mgr = LighterCandleManager(
+            client=_mk_client(),
+            assets=["BTC", "ETH"],
+            intervals=["5m"],
+            on_candle_close=MagicMock(),
+        )
+        assert mgr.intervals == ["5m"]
+        assert mgr._assets == ["BTC", "ETH"]
+
+    def test_pause_resume_flags(self):
+        mgr = LighterCandleManager(
+            client=_mk_client(),
+            assets=["BTC"],
+            intervals=["5m"],
+            on_candle_close=MagicMock(),
+        )
+        assert mgr._paused is False
+        mgr.pause()
+        assert mgr._paused is True
+        mgr.resume()
+        assert mgr._paused is False
