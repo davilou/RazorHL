@@ -5,6 +5,8 @@ and walk-forward optimization (WFO) on top of the original scanner.
 Reuses the indicator helpers and stats from scanner.py without modifying it.
 """
 import random
+import threading
+import uuid
 from itertools import product
 
 import numpy as np
@@ -24,6 +26,7 @@ from bot.backtest.scanner import (
     _stats,
     _stoch_cache,
     _tf_minutes,
+    get_available_assets,
 )
 from bot.backtest.csv_loader import _update_csv
 from bot.logger import get_logger
@@ -1108,3 +1111,83 @@ def run_scan_wfo(asset: str, total_days: int = 180,
         "sum_roi_is": sum_roi_is,
         "sum_roi_oos": sum_roi_oos,
     }
+
+
+# ── Job management ────────────────────────────────────────────────────────
+
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+
+
+def _make_progress_cb(job_id: str):
+    def cb(msg: str):
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id]["progress"] = msg
+    return cb
+
+
+def start_scan_v2_job(asset: str, days: int = 90,
+                      strategies: list[str] | None = None,
+                      timeframe: str = "5m",
+                      max_combos_per_family: int = _DEFAULT_MAX_COMBOS) -> str:
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _jobs[job_id] = {"kind": "scan", "status": "running", "progress": "Iniciando...",
+                         "result": None, "error": None}
+
+    def _run():
+        try:
+            result = run_scan_v2(asset, days, strategies,
+                                 progress_cb=_make_progress_cb(job_id),
+                                 timeframe=timeframe,
+                                 max_combos_per_family=max_combos_per_family)
+            with _jobs_lock:
+                if "error" in result:
+                    _jobs[job_id].update(status="error", error=result["error"])
+                else:
+                    _jobs[job_id].update(status="done", result=result)
+        except Exception as exc:
+            log.error(f"[scanner_v2] Job {job_id} failed: {exc}")
+            with _jobs_lock:
+                _jobs[job_id].update(status="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return job_id
+
+
+def start_wfo_job(asset: str, total_days: int = 180,
+                  n_windows: int = 4, train_ratio: float = 0.7,
+                  strategies: list[str] | None = None,
+                  timeframe: str = "5m",
+                  top_n: int = 5,
+                  max_combos_per_family: int = _DEFAULT_MAX_COMBOS) -> str:
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _jobs[job_id] = {"kind": "wfo", "status": "running", "progress": "Iniciando WFO...",
+                         "result": None, "error": None}
+
+    def _run():
+        try:
+            result = run_scan_wfo(asset, total_days=total_days, n_windows=n_windows,
+                                  train_ratio=train_ratio, strategies=strategies,
+                                  timeframe=timeframe, top_n=top_n,
+                                  max_combos_per_family=max_combos_per_family,
+                                  progress_cb=_make_progress_cb(job_id))
+            with _jobs_lock:
+                if "error" in result:
+                    _jobs[job_id].update(status="error", error=result["error"])
+                else:
+                    _jobs[job_id].update(status="done", result=result)
+        except Exception as exc:
+            log.error(f"[scanner_v2.wfo] Job {job_id} failed: {exc}")
+            with _jobs_lock:
+                _jobs[job_id].update(status="error", error=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return job_id
+
+
+def get_job(job_id: str) -> dict | None:
+    with _jobs_lock:
+        return _jobs.get(job_id)

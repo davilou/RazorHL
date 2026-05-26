@@ -1,0 +1,804 @@
+{% extends "base.html" %}
+{% block title %}Scanner v2{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Scanner v2</h1>
+  <p class="page-subtitle">Grid scan com filtros ADX/Sess&atilde;o/ATR + Walk-Forward Optimization</p>
+</div>
+
+<!-- Mode tabs -->
+<div style="display:flex;gap:8px;margin-bottom:20px;border-bottom:1px solid #1E3A5F;">
+  <button class="sc2-mode-tab active" data-mode="grid" onclick="switchMode('grid', this)">Grid Scan</button>
+  <button class="sc2-mode-tab" data-mode="wfo" onclick="switchMode('wfo', this)">Walk-Forward</button>
+</div>
+
+<!-- ─────────────────── GRID MODE ─────────────────── -->
+<div id="mode-grid">
+  <div class="filters">
+    <div class="filter-group">
+      <span class="filter-label">Timeframe</span>
+      <select id="sc-tf" style="width:100px" onchange="reloadAssets()">
+        <option value="5m" selected>5m</option>
+        <option value="15m">15m</option>
+        <option value="30m">30m</option>
+        <option value="1h">1h</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Ativo</span>
+      <select id="sc-asset" style="width:120px"></select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Per&iacute;odo</span>
+      <select id="sc-days" style="width:120px">
+        <option value="30">30 dias</option>
+        <option value="60">60 dias</option>
+        <option value="90" selected>90 dias</option>
+        <option value="180">180 dias</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label" title="M&aacute;ximo de combina&ccedil;&otilde;es por fam&iacute;lia. Excedente &eacute; amostrado deterministicamente (Random(42))">Max combos</span>
+      <select id="sc-max-combos" style="width:120px">
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+        <option value="2500">2500</option>
+        <option value="5000" selected>5000</option>
+        <option value="10000">10000</option>
+      </select>
+    </div>
+    <div class="filter-group" style="flex-direction:column;align-items:flex-start;gap:6px;">
+      <span class="filter-label">Estrat&eacute;gias</span>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <label class="sc-chk"><input type="checkbox" value="BB_Stoch"     checked> BB Stoch</label>
+        <label class="sc-chk"><input type="checkbox" value="Stoch_Scalp"  checked> Stoch Scalp</label>
+        <label class="sc-chk"><input type="checkbox" value="EMA_Cross"    checked> EMA Cross</label>
+        <label class="sc-chk"><input type="checkbox" value="BB_Reversion" checked> BB Reversion</label>
+        <label class="sc-chk"><input type="checkbox" value="RSI_Scalp"    checked> RSI Scalp</label>
+        <label class="sc-chk"><input type="checkbox" value="BB_RSI"       checked> BB RSI</label>
+        <label class="sc-chk"><input type="checkbox" value="MACD_Cross"   checked> MACD Cross</label>
+        <label class="sc-chk"><input type="checkbox" value="Williams_R"   checked> Williams %R</label>
+      </div>
+    </div>
+    <div class="filter-group" style="align-self:flex-end;">
+      <button class="btn btn-primary" onclick="runScan()" style="cursor:pointer">&#9654; Rodar Grid</button>
+    </div>
+  </div>
+
+  <div id="sc-loading" style="display:none;padding:32px 0;text-align:center;">
+    <div class="spinner" style="display:inline-block;width:32px;height:32px;border:3px solid #1E3A5F;border-top-color:#3B82F6;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+    <div id="sc-progress" style="color:#94A3B8;font-size:0.875rem;margin-top:8px;">Iniciando...</div>
+  </div>
+
+  <div id="sc-error" style="display:none;padding:16px;background:rgba(239,68,68,0.1);border:1px solid #EF4444;border-radius:8px;color:#EF4444;margin-bottom:16px;"></div>
+
+  <div id="sc-results" style="display:none;">
+    <div class="card-grid" style="margin-bottom:24px;" id="sc-summary-cards"></div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;" id="sc-tabs"></div>
+      <button class="sc-tab" id="filter-toggle-btn" onclick="toggleFilters()" style="border-color:#3B82F6;color:#3B82F6;">&#9881; Filtros</button>
+    </div>
+
+    <div id="sc-filter-panel" style="display:none;background:#0A1018;border:1px solid #1E3A5F;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+        <div class="flt-group"><div class="flt-label">Min ROI (%)</div><input class="flt-input" type="number" id="f-roi" oninput="applyFilters()"></div>
+        <div class="flt-group"><div class="flt-label">Min Win Rate (%)</div><input class="flt-input" type="number" id="f-wr" oninput="applyFilters()"></div>
+        <div class="flt-group"><div class="flt-label">Min PF</div><input class="flt-input" type="number" id="f-pf" step="0.05" oninput="applyFilters()"></div>
+        <div class="flt-group"><div class="flt-label">Max DD (%)</div><input class="flt-input" type="number" id="f-dd" oninput="applyFilters()"></div>
+        <div class="flt-group"><div class="flt-label">Min Trades</div><input class="flt-input" type="number" id="f-trades" oninput="applyFilters()"></div>
+        <div class="flt-group"><div class="flt-label">Min TPD</div><input class="flt-input" type="number" id="f-tpd-min" step="0.5" oninput="applyFilters()"></div>
+        <div class="flt-group"><div class="flt-label">Max TPD</div><input class="flt-input" type="number" id="f-tpd-max" step="0.5" oninput="applyFilters()"></div>
+        <div class="flt-group">
+          <div class="flt-label">ADX filter</div>
+          <select class="flt-input" id="f-adx" onchange="applyFilters()" style="width:110px;">
+            <option value="any">Qualquer</option>
+            <option value="on">Apenas ON</option>
+            <option value="off">Apenas OFF</option>
+          </select>
+        </div>
+        <div class="flt-group">
+          <div class="flt-label">Session filter</div>
+          <select class="flt-input" id="f-sess" onchange="applyFilters()" style="width:110px;">
+            <option value="any">Qualquer</option>
+            <option value="on">Apenas ON</option>
+            <option value="off">Apenas OFF</option>
+          </select>
+        </div>
+        <div class="flt-group">
+          <div class="flt-label">ATR TP/SL</div>
+          <select class="flt-input" id="f-atr" onchange="applyFilters()" style="width:110px;">
+            <option value="any">Qualquer</option>
+            <option value="on">Apenas ATR</option>
+            <option value="off">Apenas %</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-self:flex-end;">
+          <button class="btn" onclick="resetFilters()" style="background:#1E3A5F;cursor:pointer;">Resetar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="sc-count" style="color:#64748B;font-size:0.8rem;margin-bottom:8px;"></div>
+
+    <div class="table-container">
+      <table id="sc-table">
+        <thead>
+          <tr>
+            <th class="sortable" data-col="strategy" onclick="sortBy('strategy')">Estrat&eacute;gia <span class="sort-icon">&#8645;</span></th>
+            <th>Par&acirc;metros base</th>
+            <th title="ADX filter">ADX</th>
+            <th title="Sess&atilde;o UTC">Sess</th>
+            <th title="ATR-based TP/SL">ATR</th>
+            <th class="sortable" data-col="trades" onclick="sortBy('trades')">Trades <span class="sort-icon">&#8645;</span></th>
+            <th class="sortable" data-col="wr" onclick="sortBy('wr')">WR <span class="sort-icon">&#8645;</span></th>
+            <th class="sortable" data-col="roi" onclick="sortBy('roi')">ROI <span class="sort-icon">&#8645;</span></th>
+            <th class="sortable" data-col="pf" onclick="sortBy('pf')">PF <span class="sort-icon">&#8645;</span></th>
+            <th class="sortable" data-col="tpd" onclick="sortBy('tpd')">TPD <span class="sort-icon">&#8645;</span></th>
+            <th class="sortable" data-col="max_dd" onclick="sortBy('max_dd')">DD <span class="sort-icon">&#8645;</span></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="sc-tbody">
+          <tr><td colspan="12" class="empty-state"><p>Rode o grid scan para ver resultados</p></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────────────── WFO MODE ─────────────────── -->
+<div id="mode-wfo" style="display:none;">
+  <div class="filters">
+    <div class="filter-group">
+      <span class="filter-label">Timeframe</span>
+      <select id="wfo-tf" style="width:100px" onchange="reloadAssetsWfo()">
+        <option value="5m" selected>5m</option>
+        <option value="15m">15m</option>
+        <option value="30m">30m</option>
+        <option value="1h">1h</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Ativo</span>
+      <select id="wfo-asset" style="width:120px"></select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Total dias</span>
+      <select id="wfo-days" style="width:120px">
+        <option value="90">90</option>
+        <option value="180" selected>180</option>
+        <option value="270">270</option>
+        <option value="365">365</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Janelas</span>
+      <select id="wfo-n" style="width:80px">
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4" selected>4</option>
+        <option value="6">6</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Train ratio</span>
+      <select id="wfo-tr" style="width:90px">
+        <option value="0.5">0.5</option>
+        <option value="0.6">0.6</option>
+        <option value="0.7" selected>0.7</option>
+        <option value="0.8">0.8</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Top N</span>
+      <select id="wfo-topn" style="width:80px">
+        <option value="3">3</option>
+        <option value="5" selected>5</option>
+        <option value="10">10</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Max combos</span>
+      <select id="wfo-max-combos" style="width:120px">
+        <option value="500">500</option>
+        <option value="1000" selected>1000</option>
+        <option value="2500">2500</option>
+        <option value="5000">5000</option>
+      </select>
+    </div>
+    <div class="filter-group" style="flex-direction:column;align-items:flex-start;gap:6px;">
+      <span class="filter-label">Estrat&eacute;gias</span>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <label class="wfo-chk"><input type="checkbox" value="BB_Stoch" checked> BB Stoch</label>
+        <label class="wfo-chk"><input type="checkbox" value="Stoch_Scalp"> Stoch Scalp</label>
+        <label class="wfo-chk"><input type="checkbox" value="EMA_Cross"> EMA Cross</label>
+        <label class="wfo-chk"><input type="checkbox" value="BB_Reversion"> BB Reversion</label>
+        <label class="wfo-chk"><input type="checkbox" value="RSI_Scalp"> RSI Scalp</label>
+        <label class="wfo-chk"><input type="checkbox" value="BB_RSI"> BB RSI</label>
+        <label class="wfo-chk"><input type="checkbox" value="MACD_Cross"> MACD Cross</label>
+        <label class="wfo-chk"><input type="checkbox" value="Williams_R"> Williams %R</label>
+      </div>
+    </div>
+    <div class="filter-group" style="align-self:flex-end;">
+      <button class="btn btn-primary" onclick="runWfo()" style="cursor:pointer">&#9654; Rodar WFO</button>
+    </div>
+  </div>
+
+  <div id="wfo-loading" style="display:none;padding:32px 0;text-align:center;">
+    <div class="spinner" style="display:inline-block;width:32px;height:32px;border:3px solid #1E3A5F;border-top-color:#3B82F6;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+    <div id="wfo-progress" style="color:#94A3B8;font-size:0.875rem;margin-top:8px;">Iniciando WFO...</div>
+  </div>
+
+  <div id="wfo-error" style="display:none;padding:16px;background:rgba(239,68,68,0.1);border:1px solid #EF4444;border-radius:8px;color:#EF4444;margin-bottom:16px;"></div>
+
+  <div id="wfo-results" style="display:none;">
+    <!-- KPIs -->
+    <div class="card-grid" style="margin-bottom:24px;" id="wfo-kpis"></div>
+
+    <!-- Window breakdown -->
+    <h3 style="color:#E2E8F0;font-size:1rem;margin-bottom:12px;">Performance por janela</h3>
+    <div class="table-container" style="margin-bottom:24px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Janela</th>
+            <th>N&deg; aprovados (IS)</th>
+            <th>ROI IS</th>
+            <th>ROI OOS</th>
+            <th>Efici&ecirc;ncia</th>
+            <th>Comparativo</th>
+          </tr>
+        </thead>
+        <tbody id="wfo-windows-tbody"></tbody>
+      </table>
+    </div>
+
+    <h3 style="color:#E2E8F0;font-size:1rem;margin-bottom:12px;">Top par&acirc;metros por janela</h3>
+    <div id="wfo-params-list"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<!-- Apply modal (compartilhado entre Grid e WFO) -->
+<div id="sc-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:#0F1923;border:1px solid #1E3A5F;border-radius:12px;padding:24px;width:480px;max-width:90vw;">
+    <h3 style="margin:0 0 16px;color:#E2E8F0;">Aplicar Par&acirc;metros</h3>
+    <p style="color:#94A3B8;font-size:0.875rem;margin-bottom:12px;">
+      Inst&acirc;ncia: <span id="modal-instance" style="color:#3B82F6;font-weight:600;"></span>
+    </p>
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:#94A3B8;font-size:0.78rem;margin-bottom:6px;">Identificador (opcional)</label>
+      <input type="text" id="modal-tag" oninput="onTagInput()" style="width:100%;background:#0A1018;border:1px solid #1E3A5F;border-radius:6px;padding:8px 10px;color:#E2E8F0;font-family:'JetBrains Mono',monospace;font-size:0.85rem;">
+    </div>
+    <p style="color:#F59E0B;font-size:0.75rem;margin-bottom:8px;">
+      &#9888; Os campos ADX/Sess&atilde;o/ATR ficam preservados em scanner_metrics, mas a estrat&eacute;gia live ainda usa apenas os par&acirc;metros base (BB/RSI/Stoch/etc + TP/SL %).
+    </p>
+    <pre id="modal-params" style="background:#0A1018;border:1px solid #1E3A5F;border-radius:6px;padding:12px;font-size:0.8rem;color:#94A3B8;overflow:auto;max-height:200px;"></pre>
+    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
+      <button class="btn" onclick="closeModal()" style="background:#1E3A5F;cursor:pointer;">Cancelar</button>
+      <button class="btn btn-primary" onclick="confirmApply()" style="cursor:pointer;">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+.sc-chk, .wfo-chk { color:#94A3B8;font-size:0.875rem;display:flex;align-items:center;gap:6px;cursor:pointer; }
+.sc-chk input, .wfo-chk input { accent-color:#3B82F6;cursor:pointer; }
+.sc-tab { padding:6px 14px;border-radius:6px;border:1px solid #1E3A5F;background:transparent;color:#64748B;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:0.8rem; }
+.sc-tab.active { background:#1E3A5F;color:#E2E8F0;border-color:#3B82F6; }
+.sc2-mode-tab { padding:10px 20px;background:transparent;border:none;border-bottom:2px solid transparent;color:#64748B;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:0.9rem;font-weight:500; }
+.sc2-mode-tab.active { color:#3B82F6;border-bottom-color:#3B82F6; }
+.sc2-mode-tab:hover { color:#E2E8F0; }
+.sortable { cursor:pointer;user-select:none; }
+.sortable:hover { color:#E2E8F0; }
+.sort-icon { color:#1E3A5F;font-size:0.7rem; }
+th[data-sorted] .sort-icon { color:#3B82F6; }
+.flt-group { display:flex;flex-direction:column;gap:4px; }
+.flt-label { color:#64748B;font-size:0.75rem;font-family:'JetBrains Mono',monospace; }
+.flt-input { width:90px;background:#0F1923;border:1px solid #1E3A5F;border-radius:6px;padding:6px 8px;color:#E2E8F0;font-family:'JetBrains Mono',monospace;font-size:0.8rem; }
+.flt-input:focus { outline:none;border-color:#3B82F6; }
+.fchip { display:inline-block;padding:2px 6px;border-radius:4px;font-size:0.7rem;font-family:'JetBrains Mono',monospace; }
+.fchip-on { background:rgba(59,130,246,0.15);color:#3B82F6;border:1px solid rgba(59,130,246,0.3); }
+.fchip-off { background:#0A1018;color:#475569;border:1px solid #1E3A5F; }
+.eff-bar { height:8px;background:#1E3A5F;border-radius:4px;overflow:hidden;min-width:60px; }
+.eff-bar > div { height:100%;background:linear-gradient(90deg,#EF4444,#F59E0B,#10B981); }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let pollInterval = null;
+let pollWfo      = null;
+let allApproved  = [];
+let filtered     = [];
+let displayed    = [];
+let activeStrat  = 'all';
+let sortKey      = 'roi';
+let sortDir      = -1;
+let pendingApply = null;
+let activeMode   = 'grid';
+
+// ── Mode switching ────────────────────────────────────────────────
+function switchMode(mode, btn) {
+  activeMode = mode;
+  document.querySelectorAll('.sc2-mode-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('mode-grid').style.display = mode === 'grid' ? 'block' : 'none';
+  document.getElementById('mode-wfo').style.display  = mode === 'wfo'  ? 'block' : 'none';
+  if (mode === 'wfo' && !document.getElementById('wfo-asset').options.length) {
+    reloadAssetsWfo();
+  }
+}
+
+// ── Asset loading ─────────────────────────────────────────────────
+async function _loadAssetsInto(selectId, tfId) {
+  const tf = document.getElementById(tfId).value;
+  const sel = document.getElementById(selectId);
+  const prev = sel.value;
+  const r = await fetch('/api/scanner_v2/assets?timeframe=' + tf);
+  const assets = await r.json();
+  sel.innerHTML = '';
+  if (!assets || !assets.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = '(sem CSV ' + tf + ')';
+    sel.appendChild(o);
+    return;
+  }
+  assets.forEach(a => {
+    const o = document.createElement('option'); o.value = a; o.textContent = a; sel.appendChild(o);
+  });
+  if (prev && assets.includes(prev)) sel.value = prev;
+  else if (assets.includes('BTC')) sel.value = 'BTC';
+}
+async function reloadAssets()    { await _loadAssetsInto('sc-asset',  'sc-tf');  }
+async function reloadAssetsWfo() { await _loadAssetsInto('wfo-asset', 'wfo-tf'); }
+reloadAssets();
+
+// ── GRID SCAN ─────────────────────────────────────────────────────
+async function runScan() {
+  clearInterval(pollInterval);
+  document.getElementById('sc-results').style.display = 'none';
+  document.getElementById('sc-error').style.display   = 'none';
+  document.getElementById('sc-loading').style.display = 'block';
+  document.getElementById('sc-progress').textContent  = 'Iniciando...';
+
+  const asset = document.getElementById('sc-asset').value;
+  const tf    = document.getElementById('sc-tf').value;
+  const days  = parseInt(document.getElementById('sc-days').value);
+  const mc    = parseInt(document.getElementById('sc-max-combos').value);
+  const strats = [...document.querySelectorAll('#mode-grid .sc-chk input:checked')].map(c => c.value);
+  if (!asset)        { showGridError('Selecione um ativo'); return; }
+  if (!strats.length) { showGridError('Selecione ao menos uma estrat&eacute;gia'); return; }
+
+  try {
+    const res = await fetch('/api/scanner_v2/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({asset, days, strategies: strats, timeframe: tf, max_combos_per_family: mc}),
+    });
+    const data = await res.json();
+    if (!data.job_id) { showGridError(data.error || 'Falha ao iniciar'); return; }
+    pollScanStatus(data.job_id);
+  } catch(e) { showGridError('Erro de rede: ' + e.message); }
+}
+
+function pollScanStatus(jobId) {
+  pollInterval = setInterval(async () => {
+    const r = await fetch('/api/scanner_v2/status/' + jobId);
+    const job = await r.json();
+    if (!job) return;
+    const el = document.getElementById('sc-progress');
+    if (el) el.textContent = job.progress || '';
+    if (job.status === 'done') {
+      clearInterval(pollInterval);
+      document.getElementById('sc-loading').style.display = 'none';
+      document.getElementById('sc-results').style.display = 'block';
+      renderResults(job.result);
+    } else if (job.status === 'error') {
+      clearInterval(pollInterval);
+      showGridError(job.error || 'Erro desconhecido');
+    }
+  }, 2000);
+}
+
+function renderResults(data) {
+  allApproved = data.approved || [];
+  activeStrat = 'all';
+  sortKey = 'roi'; sortDir = -1;
+  renderSummaryCards(data);
+  renderTabs(data);
+  applyFilters();
+}
+
+function renderSummaryCards(data) {
+  const ps = data.per_strategy || {};
+  let html = `
+    <div class="card"><div class="card-label">Total Testados</div><div class="card-value">${data.total_tested||0}</div></div>
+    <div class="card"><div class="card-label">Aprovados</div><div class="card-value pnl-positive">${data.total_approved||0}</div></div>
+    <div class="card"><div class="card-label">Candles</div><div class="card-value">${data.candles||0}</div></div>
+    <div class="card"><div class="card-label">Max combos / fam&iacute;lia</div><div class="card-value">${data.max_combos_per_family||'?'}</div></div>`;
+  Object.entries(ps).forEach(([strat, s]) => {
+    const best = s.best_roi;
+    html += `<div class="card">
+      <div class="card-label">${strat.replace(/_/g,' ')}</div>
+      <div class="card-value">${s.approved} aprovados</div>
+      ${best ? `<div style="font-size:0.75rem;color:#64748B;margin-top:4px;">Melhor ROI: <span class="pnl-positive">${best.roi}%</span></div>` : ''}
+    </div>`;
+  });
+  document.getElementById('sc-summary-cards').innerHTML = html;
+}
+
+function renderTabs(data) {
+  const ps = data.per_strategy || {};
+  const strategies = Object.keys(ps).filter(k => ps[k].approved > 0);
+  let html = `<button class="sc-tab active" data-strat="all" onclick="filterStrat('all',this)">Todos (${allApproved.length})</button>`;
+  strategies.forEach(s => {
+    html += `<button class="sc-tab" data-strat="${s}" onclick="filterStrat('${s}',this)">${s.replace(/_/g,' ')} (${ps[s].approved})</button>`;
+  });
+  document.getElementById('sc-tabs').innerHTML = html;
+}
+
+function filterStrat(strat, btn) {
+  activeStrat = strat;
+  document.querySelectorAll('.sc-tab[data-strat]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFilters();
+}
+
+function toggleFilters() {
+  const p = document.getElementById('sc-filter-panel');
+  const b = document.getElementById('filter-toggle-btn');
+  const open = p.style.display === 'block';
+  p.style.display = open ? 'none' : 'block';
+  b.style.background = open ? 'transparent' : '#1E3A5F';
+}
+
+function applyFilters() {
+  const v = id => parseFloat(document.getElementById(id).value);
+  const minRoi    = isNaN(v('f-roi'))     ? -Infinity : v('f-roi');
+  const minWr     = isNaN(v('f-wr'))      ? 0         : v('f-wr') / 100;
+  const minPf     = isNaN(v('f-pf'))      ? 0         : v('f-pf');
+  const maxDd     = isNaN(v('f-dd'))      ? Infinity  : v('f-dd');
+  const minTrades = isNaN(v('f-trades'))  ? 0         : v('f-trades');
+  const minTpd    = isNaN(v('f-tpd-min')) ? 0         : v('f-tpd-min');
+  const maxTpd    = isNaN(v('f-tpd-max')) ? Infinity  : v('f-tpd-max');
+  const adxMode   = document.getElementById('f-adx').value;
+  const sessMode  = document.getElementById('f-sess').value;
+  const atrMode   = document.getElementById('f-atr').value;
+
+  filtered = allApproved.filter(r => {
+    if (activeStrat !== 'all' && r.strategy !== activeStrat) return false;
+    if (r.roi    < minRoi)    return false;
+    if (r.wr     < minWr)     return false;
+    if (r.pf     < minPf)     return false;
+    if (r.max_dd > maxDd)     return false;
+    if (r.trades < minTrades) return false;
+    if (r.tpd < minTpd || r.tpd > maxTpd) return false;
+    const adxOn = (r.adx_period||0) > 0;
+    if (adxMode === 'on'  && !adxOn) return false;
+    if (adxMode === 'off' &&  adxOn) return false;
+    const sessOn = !(r.session_start === 0 && r.session_end === 24);
+    if (sessMode === 'on'  && !sessOn) return false;
+    if (sessMode === 'off' &&  sessOn) return false;
+    if (atrMode === 'on'  && !r.atr_tp_mode) return false;
+    if (atrMode === 'off' &&  r.atr_tp_mode) return false;
+    return true;
+  });
+  sortAndRender();
+}
+
+function resetFilters() {
+  ['f-roi','f-wr','f-pf','f-dd','f-trades','f-tpd-min','f-tpd-max'].forEach(id => document.getElementById(id).value='');
+  ['f-adx','f-sess','f-atr'].forEach(id => document.getElementById(id).value='any');
+  applyFilters();
+}
+
+function sortBy(col) {
+  if (sortKey === col) sortDir *= -1;
+  else { sortKey = col; sortDir = col === 'strategy' ? 1 : -1; }
+  updateSortHeaders();
+  sortAndRender();
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('th[data-col]').forEach(th => {
+    const col = th.dataset.col;
+    const icon = th.querySelector('.sort-icon');
+    if (col === sortKey) { th.setAttribute('data-sorted',''); icon.textContent = sortDir === -1 ? ' &darr;' : ' &uarr;'; }
+    else { th.removeAttribute('data-sorted'); icon.textContent = ' &#8645;'; }
+  });
+}
+
+function sortAndRender() {
+  displayed = [...filtered].sort((a, b) => {
+    const av = a[sortKey], bv = b[sortKey];
+    if (typeof av === 'string') return sortDir * av.localeCompare(bv);
+    return sortDir * (bv - av);
+  });
+  document.getElementById('sc-count').textContent = `Exibindo ${displayed.length} de ${allApproved.length} aprovados`;
+  renderTable(displayed);
+}
+
+const SKIP = new Set(['strategy','trades','wr','pf','roi','tpd','max_dd','approved','monthly','tf',
+                      'adx_period','adx_min','session_start','session_end','atr_tp_mode','atr_tp_mult','atr_sl_mult']);
+
+function renderTable(rows) {
+  const asset = document.getElementById('sc-asset').value;
+  const tbody = document.getElementById('sc-tbody');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state"><p>Nenhum resultado para os filtros atuais</p></td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map((r, idx) => {
+    const wrCls  = r.wr >= 0.55 ? 'pnl-positive' : '';
+    const roiCls = r.roi > 0 ? 'pnl-positive' : 'pnl-negative';
+    const pfCls  = r.pf >= 1.2 ? 'pnl-positive' : '';
+    const ddCls  = r.max_dd > 20 ? 'pnl-negative' : '';
+    const adxChip = (r.adx_period||0) > 0
+      ? `<span class="fchip fchip-on">${r.adx_period}/&lt;${r.adx_min}</span>`
+      : '<span class="fchip fchip-off">off</span>';
+    const sessChip = (r.session_start === 0 && r.session_end === 24)
+      ? '<span class="fchip fchip-off">24h</span>'
+      : `<span class="fchip fchip-on">${r.session_start}-${r.session_end}h</span>`;
+    const atrChip = r.atr_tp_mode
+      ? `<span class="fchip fchip-on">${r.atr_tp_mult}/${r.atr_sl_mult}</span>`
+      : '<span class="fchip fchip-off">%</span>';
+    return `<tr>
+      <td style="white-space:nowrap">${r.strategy.replace(/_/g,' ')}</td>
+      <td style="font-size:0.78rem;color:#64748B;max-width:280px;white-space:normal;line-height:1.6;">${fmtParams(r)}</td>
+      <td>${adxChip}</td>
+      <td>${sessChip}</td>
+      <td>${atrChip}</td>
+      <td>${r.trades}</td>
+      <td class="${wrCls}">${(r.wr*100).toFixed(1)}%</td>
+      <td class="${roiCls}">${r.roi > 0?'+':''}${r.roi}%</td>
+      <td class="${pfCls}">${r.pf.toFixed(2)}</td>
+      <td>${r.tpd.toFixed(1)}</td>
+      <td class="${ddCls}">${r.max_dd.toFixed(1)}%</td>
+      <td><button class="btn" style="padding:4px 10px;font-size:0.75rem;cursor:pointer;" data-row-idx="${idx}">Aplicar</button></td>
+    </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('button[data-row-idx]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.rowIdx, 10);
+      const row = displayed[idx];
+      if (row) openModal(asset, row);
+    });
+  });
+}
+
+function fmtParams(r) {
+  return Object.entries(r).filter(([k]) => !SKIP.has(k) && k !== 'monthly')
+    .map(([k, v]) => `<span style="color:#94A3B8">${k}</span>=<span style="color:#E2E8F0">${v}</span>`)
+    .join(' <span style="color:#1E3A5F">&middot;</span> ');
+}
+
+// ── WFO ───────────────────────────────────────────────────────────
+async function runWfo() {
+  clearInterval(pollWfo);
+  document.getElementById('wfo-results').style.display = 'none';
+  document.getElementById('wfo-error').style.display   = 'none';
+  document.getElementById('wfo-loading').style.display = 'block';
+  document.getElementById('wfo-progress').textContent  = 'Iniciando WFO...';
+
+  const asset = document.getElementById('wfo-asset').value;
+  const tf    = document.getElementById('wfo-tf').value;
+  const td    = parseInt(document.getElementById('wfo-days').value);
+  const nw    = parseInt(document.getElementById('wfo-n').value);
+  const tr    = parseFloat(document.getElementById('wfo-tr').value);
+  const topn  = parseInt(document.getElementById('wfo-topn').value);
+  const mc    = parseInt(document.getElementById('wfo-max-combos').value);
+  const strats = [...document.querySelectorAll('#mode-wfo .wfo-chk input:checked')].map(c => c.value);
+  if (!asset)        { showWfoError('Selecione um ativo'); return; }
+  if (!strats.length) { showWfoError('Selecione ao menos uma estrat&eacute;gia'); return; }
+
+  try {
+    const res = await fetch('/api/scanner_v2/wfo', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        asset, total_days: td, n_windows: nw, train_ratio: tr,
+        strategies: strats, timeframe: tf, top_n: topn, max_combos_per_family: mc,
+      }),
+    });
+    const data = await res.json();
+    if (!data.job_id) { showWfoError(data.error || 'Falha ao iniciar'); return; }
+    pollWfoStatus(data.job_id);
+  } catch(e) { showWfoError('Erro de rede: ' + e.message); }
+}
+
+function pollWfoStatus(jobId) {
+  pollWfo = setInterval(async () => {
+    const r = await fetch('/api/scanner_v2/status/' + jobId);
+    const job = await r.json();
+    if (!job) return;
+    const el = document.getElementById('wfo-progress');
+    if (el) el.textContent = job.progress || '';
+    if (job.status === 'done') {
+      clearInterval(pollWfo);
+      document.getElementById('wfo-loading').style.display = 'none';
+      document.getElementById('wfo-results').style.display = 'block';
+      renderWfo(job.result);
+    } else if (job.status === 'error') {
+      clearInterval(pollWfo);
+      showWfoError(job.error || 'Erro desconhecido');
+    }
+  }, 2000);
+}
+
+function renderWfo(data) {
+  // KPIs
+  const eff = data.wfo_efficiency || 0;
+  const effCls = eff >= 0.7 ? 'pnl-positive' : (eff >= 0.4 ? '' : 'pnl-negative');
+  const effLabel = eff >= 0.7 ? 'Excelente' : (eff >= 0.5 ? 'Bom' : (eff >= 0.3 ? 'Marginal' : 'Overfit'));
+  const roiIs = data.sum_roi_is || 0;
+  const roiOos = data.sum_roi_oos || 0;
+  document.getElementById('wfo-kpis').innerHTML = `
+    <div class="card"><div class="card-label">Ativo / TF</div><div class="card-value">${data.asset} / ${data.timeframe}</div></div>
+    <div class="card"><div class="card-label">Janelas</div><div class="card-value">${data.n_windows} (train ${(data.train_ratio*100).toFixed(0)}%)</div></div>
+    <div class="card"><div class="card-label">Total dias</div><div class="card-value">${data.total_days}</div></div>
+    <div class="card"><div class="card-label">Efici&ecirc;ncia WFO</div>
+      <div class="card-value ${effCls}">${eff.toFixed(2)}</div>
+      <div style="font-size:0.7rem;color:#64748B;margin-top:4px;">${effLabel} (>0.5 = generaliza)</div>
+    </div>
+    <div class="card"><div class="card-label">Soma ROI IS</div><div class="card-value ${roiIs>0?'pnl-positive':'pnl-negative'}">${roiIs.toFixed(2)}%</div></div>
+    <div class="card"><div class="card-label">Soma ROI OOS</div><div class="card-value ${roiOos>0?'pnl-positive':'pnl-negative'}">${roiOos.toFixed(2)}%</div></div>
+  `;
+
+  // Windows table
+  const tbody = document.getElementById('wfo-windows-tbody');
+  tbody.innerHTML = (data.windows || []).map(w => {
+    const is = w.is || {}; const oos = w.oos || {};
+    const ri = is.roi_is || 0; const ro = oos.roi_oos || 0;
+    const winEff = ri > 0 ? ro / ri : 0;
+    const winEffCls = winEff >= 0.5 ? 'pnl-positive' : (winEff >= 0.3 ? '' : 'pnl-negative');
+    const barWidth = Math.max(0, Math.min(100, winEff * 100));
+    if (w.skipped) {
+      return `<tr><td>${w.window_idx+1}</td><td colspan="5" style="color:#64748B;font-style:italic;">Pulada (dados insuficientes)</td></tr>`;
+    }
+    return `<tr>
+      <td>${w.window_idx+1}</td>
+      <td>${is.n_approved||0}</td>
+      <td class="${ri>0?'pnl-positive':'pnl-negative'}">${ri.toFixed(2)}%</td>
+      <td class="${ro>0?'pnl-positive':'pnl-negative'}">${ro.toFixed(2)}%</td>
+      <td class="${winEffCls}">${winEff.toFixed(2)}</td>
+      <td><div class="eff-bar"><div style="width:${barWidth}%"></div></div></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="empty-state"><p>Sem janelas</p></td></tr>';
+
+  // Top params per window (collapsed)
+  const paramsList = document.getElementById('wfo-params-list');
+  paramsList.innerHTML = (data.windows || []).map((w, wi) => {
+    if (w.skipped) return '';
+    const oosResults = (w.oos && w.oos.results) || [];
+    const rows = (w.is.params || []).map((p, pi) => {
+      const oos = oosResults[pi] || {};
+      const isCls = p.roi > 0 ? 'pnl-positive' : 'pnl-negative';
+      const oosCls = (oos.roi||0) > 0 ? 'pnl-positive' : 'pnl-negative';
+      const adxChip = (p.adx_period||0) > 0
+        ? `<span class="fchip fchip-on">${p.adx_period}/&lt;${p.adx_min}</span>`
+        : '<span class="fchip fchip-off">off</span>';
+      const sessChip = (p.session_start === 0 && p.session_end === 24)
+        ? '<span class="fchip fchip-off">24h</span>'
+        : `<span class="fchip fchip-on">${p.session_start}-${p.session_end}h</span>`;
+      const atrChip = p.atr_tp_mode
+        ? `<span class="fchip fchip-on">${p.atr_tp_mult}/${p.atr_sl_mult}</span>`
+        : '<span class="fchip fchip-off">%</span>';
+      return `<tr>
+        <td>${p.strategy.replace(/_/g,' ')}</td>
+        <td style="font-size:0.78rem;color:#64748B;max-width:240px;white-space:normal;">${fmtParams(p)}</td>
+        <td>${adxChip}</td><td>${sessChip}</td><td>${atrChip}</td>
+        <td class="${isCls}">${p.roi.toFixed(2)}%</td>
+        <td>${(p.wr*100).toFixed(1)}%</td>
+        <td class="${oosCls}">${(oos.roi||0).toFixed(2)}%</td>
+        <td>${oos.trades||0}</td>
+        <td><button class="btn" style="padding:4px 10px;font-size:0.75rem;cursor:pointer;" data-w="${wi}" data-p="${pi}">Aplicar</button></td>
+      </tr>`;
+    }).join('');
+    return `
+      <details style="margin-bottom:8px;background:#0F1923;border:1px solid #1E3A5F;border-radius:8px;padding:8px 12px;" ${wi===0?'open':''}>
+        <summary style="cursor:pointer;color:#E2E8F0;font-size:0.9rem;">Janela ${w.window_idx+1} &mdash; ${w.is.n_approved||0} aprovados IS</summary>
+        <div class="table-container" style="margin-top:8px;">
+          <table>
+            <thead>
+              <tr><th>Estrat&eacute;gia</th><th>Par&acirc;metros base</th><th>ADX</th><th>Sess</th><th>ATR</th>
+                  <th>ROI IS</th><th>WR IS</th><th>ROI OOS</th><th>Tr OOS</th><th></th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="10" class="empty-state"><p>Sem par&acirc;metros aprovados</p></td></tr>'}</tbody>
+          </table>
+        </div>
+      </details>`;
+  }).join('');
+
+  // Wire up apply buttons in WFO results
+  paramsList.querySelectorAll('button[data-w]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const wi = parseInt(btn.dataset.w, 10);
+      const pi = parseInt(btn.dataset.p, 10);
+      const win = data.windows[wi];
+      const row = win && win.is && win.is.params && win.is.params[pi];
+      if (row) openModal(data.asset, row);
+    });
+  });
+}
+
+// ── Apply modal ───────────────────────────────────────────────────
+function slugify(s) {
+  return (s || '').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,24);
+}
+
+function computeInstanceName(strategy, asset, tag, tf) {
+  const slug = slugify(tag);
+  const base = strategy.toLowerCase() + '_' + asset.toLowerCase() + '_' + (tf || '5m');
+  return slug ? (base + '_' + slug) : base;
+}
+
+function defaultTagFromRow(row) {
+  const wr  = row.wr  != null ? Math.round(row.wr * 100)  : '?';
+  const roi = row.roi != null ? Math.round(row.roi)       : '?';
+  const tpd = row.tpd != null ? Number(row.tpd).toFixed(1) : '?';
+  return `${wr}/${roi}/${tpd}`;
+}
+
+function openModal(asset, row) {
+  const defaultTag = defaultTagFromRow(row);
+  const tf = row.tf || document.getElementById(activeMode==='grid'?'sc-tf':'wfo-tf').value || '5m';
+  pendingApply = {asset, strategy: row.strategy, params: row, tag: defaultTag, timeframe: tf};
+  document.getElementById('modal-tag').value = defaultTag;
+  document.getElementById('modal-instance').textContent = computeInstanceName(row.strategy, asset, defaultTag, tf);
+  const params = Object.fromEntries(Object.entries(row).filter(([k]) => !SKIP.has(k) && k!=='monthly'));
+  document.getElementById('modal-params').textContent = JSON.stringify(params, null, 2);
+  document.getElementById('sc-modal').style.display = 'flex';
+}
+
+function onTagInput() {
+  if (!pendingApply) return;
+  const tag = document.getElementById('modal-tag').value;
+  pendingApply.tag = tag;
+  document.getElementById('modal-instance').textContent =
+    computeInstanceName(pendingApply.strategy, pendingApply.asset, tag, pendingApply.timeframe);
+}
+
+function closeModal() {
+  document.getElementById('sc-modal').style.display = 'none';
+  pendingApply = null;
+}
+
+async function confirmApply() {
+  if (!pendingApply) return;
+  const payload = pendingApply;
+  closeModal();
+  try {
+    const res = await fetch('/api/scanner_v2/apply', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.ok) { showToast('&#10003; Aplicado em ' + data.instance, false); }
+    else { showToast('&#10007; ' + (data.error || 'Falha ao aplicar'), true); }
+  } catch(e) { showToast('&#10007; Erro de rede: ' + e.message, true); }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+function showGridError(msg) {
+  document.getElementById('sc-loading').style.display = 'none';
+  const el = document.getElementById('sc-error');
+  el.textContent = msg; el.style.display = 'block';
+}
+function showWfoError(msg) {
+  document.getElementById('wfo-loading').style.display = 'none';
+  const el = document.getElementById('wfo-error');
+  el.textContent = msg; el.style.display = 'block';
+}
+function showToast(msg, isError = false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.toggle('error', isError);
+  t.classList.add('show');
+  setTimeout(() => { t.classList.remove('show'); t.classList.remove('error'); }, 4000);
+}
+</script>
+{% endblock %}

@@ -36,7 +36,7 @@ def create_app():
     def check_configured():
         # API calls always pass through — only redirect HTML page requests
         if request.endpoint and not request.endpoint.startswith("api_") and request.endpoint not in (
-            "config_page", "static", "backtest_page", "scanner_page", "strategies_page", "ativos_page", "analise_page",
+            "config_page", "static", "backtest_page", "scanner_page", "scanner_v2_page", "strategies_page", "ativos_page", "analise_page",
         ):
             if not db.is_configured():
                 return redirect(url_for("config_page"))
@@ -68,6 +68,10 @@ def create_app():
     @app.route("/scanner")
     def scanner_page():
         return render_template("scanner.html", page="scanner")
+
+    @app.route("/scanner_v2")
+    def scanner_v2_page():
+        return render_template("scanner_v2.html", page="scanner_v2")
 
     @app.route("/strategies")
     def strategies_page():
@@ -418,6 +422,70 @@ def create_app():
 
     @app.route("/api/scanner/apply", methods=["POST"])
     def api_scanner_apply():
+        from bot.backtest.scanner import apply_result
+        data = request.get_json() or {}
+        result = apply_result(
+            data.get("asset", "").upper(),
+            data.get("strategy", ""),
+            data.get("params", {}),
+            tag=data.get("tag"),
+            timeframe=data.get("timeframe", "5m"),
+        )
+        if "error" in result:
+            return jsonify(result), 400
+        return jsonify(result)
+
+    # ── Scanner v2 API (grid scan + walk-forward) ────────────────────
+
+    @app.route("/api/scanner_v2/assets")
+    def api_scanner_v2_assets():
+        from bot.backtest.scanner_v2 import get_available_assets
+        tf = request.args.get("timeframe", "5m")
+        return jsonify(get_available_assets(timeframe=tf))
+
+    @app.route("/api/scanner_v2/run", methods=["POST"])
+    def api_scanner_v2_run():
+        from bot.backtest.scanner_v2 import start_scan_v2_job
+        data = request.get_json() or {}
+        job_id = start_scan_v2_job(
+            data.get("asset", "BTC").upper(),
+            int(data.get("days", 90)),
+            data.get("strategies") or None,
+            timeframe=data.get("timeframe", "5m"),
+            max_combos_per_family=int(data.get("max_combos_per_family", 5000)),
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/scanner_v2/status/<job_id>")
+    def api_scanner_v2_status(job_id):
+        from bot.backtest.scanner_v2 import get_job
+        job = get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        return jsonify(job)
+
+    @app.route("/api/scanner_v2/wfo", methods=["POST"])
+    def api_scanner_v2_wfo():
+        from bot.backtest.scanner_v2 import start_wfo_job
+        data = request.get_json() or {}
+        job_id = start_wfo_job(
+            data.get("asset", "BTC").upper(),
+            total_days=int(data.get("total_days", 180)),
+            n_windows=int(data.get("n_windows", 4)),
+            train_ratio=float(data.get("train_ratio", 0.7)),
+            strategies=data.get("strategies") or None,
+            timeframe=data.get("timeframe", "5m"),
+            top_n=int(data.get("top_n", 5)),
+            max_combos_per_family=int(data.get("max_combos_per_family", 5000)),
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/scanner_v2/apply", methods=["POST"])
+    def api_scanner_v2_apply():
+        # Reusa o apply_result do scanner antigo: os 7 campos novos (adx/session/atr)
+        # ficam preservados em scanner_metrics.scanner_params (não traduzidos para
+        # params live ainda — a live engine não os consome). _METRIC_KEYS filtra
+        # as métricas; o resto vai pra scanner_params.
         from bot.backtest.scanner import apply_result
         data = request.get_json() or {}
         result = apply_result(
