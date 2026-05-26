@@ -29,11 +29,17 @@ _CANDLES_DIR = Path(__file__).parents[3] / "candles"
 _SCAN_WARMUP_DAYS = 2
 
 # ── Approval criteria ──────────────────────────────────────────────────────
+# wr_min/tpd_min/tpd_max foram desabilitados (valores permissivos) porque:
+#  - wr_min: assumia TP/SL simétricos; combos com TP>SL e WR baixo+PF alto eram
+#    rejeitados injustamente. PF (>=1.1) já captura "ganha mais do que perde".
+#  - tpd_min/tpd_max: calibrados pra 5m, rejeitavam combos legítimos no 15m/1h.
+# Filtros equivalentes continuam disponíveis no painel de UI (Min Win Rate,
+# Min TPD, Max TPD) — só não bloqueiam mais por default.
 APPROVAL = {
     "pf_min":     1.1,
-    "wr_min":     0.50,
-    "tpd_min":    1.0,
-    "tpd_max":    15.0,
+    "wr_min":     0.0,
+    "tpd_min":    0.0,
+    "tpd_max":    999.0,
     "max_dd_max": 30.0,
     "min_trades": 5,
 }
