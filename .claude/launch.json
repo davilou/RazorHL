@@ -4,7 +4,7 @@
     {
       "name": "RazorHL Dashboard",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["D:\\Documentos\\Trae\\RazorHL\\hyperliquid-bot\\run.py"],
+      "runtimeArgs": ["C:\\Users\\User\\Documents\\Vibe Code\\RazorHL\\hyperliquid-bot\\run.py"],
       "port": 8080
     }
   ]
