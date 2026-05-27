@@ -692,7 +692,22 @@ input:focus, select:focus {
   color: var(--text-primary);
   box-shadow: 0 20px 60px rgba(0,0,0,0.6);
 }
-.modal h3 { margin: 0 0 14px; font-size: 16px; }
+.modal h3 { margin: 0 0 14px; font-size: 16px; padding-right: 32px; }
+.modal .modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: transparent;
+  color: var(--text-secondary, #94a3b8);
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.modal .modal-close:hover { background: var(--bg-card-hover); color: var(--accent-red); }
+.modal { position: relative; }
 .modal label {
   display: block;
   margin: 10px 0;

@@ -266,7 +266,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (back) {
     back.addEventListener('click', (e) => {
-      if (e.target === back || (e.target.dataset && e.target.dataset.close !== undefined)) closeProfileModal();
+      // Close when clicking the dim backdrop OR any element marked with
+      // `data-close` (Cancelar button, top-right × icon, etc).
+      const t = e.target;
+      if (t === back) { closeProfileModal(); return; }
+      if (t.closest && t.closest('[data-close]')) { closeProfileModal(); return; }
+    });
+    // ESC anywhere on the page dismisses an open modal — covers "I clicked
+    // somewhere weird and the modal won't go" scenarios.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !back.hidden) closeProfileModal();
     });
   }
 
