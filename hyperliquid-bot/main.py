@@ -30,12 +30,25 @@ from bot.risk import RiskManager
 
 log = get_logger("main")
 
-# Global state
-client: BaseExchangeClient = create_exchange_client()
-risk_mgr: RiskManager | None = None
+# ── Global state ──────────────────────────────────────────────────────────
+#
+# Each profile owns its own exchange client, risk manager and stop event.
+# The candle manager is a shared singleton fed by the union of every running
+# profile's assets — restored/updated via `_refresh_candle_manager_assets`.
+#
+# All mutations of these dicts happen under `_bot_lock`. Readers (e.g. the
+# candle callback dispatch) snapshot the keys under the lock and iterate
+# outside it so worker threads do not block bot start/stop.
+
+_bot_threads: dict[int, threading.Thread] = {}
+_bot_clients: dict[int, BaseExchangeClient] = {}
+_risk_mgrs: dict[int, RiskManager] = {}
+_stop_events: dict[int, threading.Event] = {}
+_bot_lock = threading.Lock()
+
 candle_mgr: BinanceCandleManager | LighterCandleManager | None = None
-_stop_event = threading.Event()
-_bot_thread: threading.Thread | None = None
+_candle_mgr_lock = threading.Lock()
+
 _asset_live_status: dict[str, dict] = {}
 _status_lock = threading.Lock()
 
@@ -45,13 +58,172 @@ def get_asset_live_status() -> dict:
         return dict(_asset_live_status)
 
 
-def bot_loop(profile_id: int = 1):
-    """Main bot loop — event-driven via candle manager WebSocket.
+def _build_client_for_profile(profile_id: int) -> BaseExchangeClient:
+    """Instantiate the exchange client for this profile and call .connect().
 
-    Single-profile today. Phase 4 turns this into a dict of loops keyed by
-    profile_id; the candle manager remains a singleton shared by all profiles.
+    The factory reads credentials from the profile row (Phase 4) — Phase 2's
+    fallback to global config still works because the legacy keys were not
+    deleted by M8. Callers wrap this in a try/except to surface auth errors
+    cleanly back to the dashboard.
     """
-    global risk_mgr, candle_mgr
+    return create_exchange_client(profile_id=profile_id)
+
+
+def _union_assets() -> list[str]:
+    """Sorted union of assets across every running profile.
+
+    Used to drive the shared candle manager's subscription list.
+    """
+    seen: set[str] = set()
+    with _bot_lock:
+        pids = [pid for pid, t in _bot_threads.items() if t.is_alive()]
+    for pid in pids:
+        # 1. Profile-scoped global assets list (config UI / sizing tab)
+        raw = db.get_profile_config(pid, "assets") or db.get_config("monitored_assets") or "[]"
+        try:
+            seen.update(json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+        # 2. Plus any assets pinned by the profile's enabled strategies
+        try:
+            seen.update(get_active_assets(list(seen), profile_id=pid))
+        except Exception:
+            log.exception("union_assets: failed to read strategies for profile %s", pid)
+    return sorted(seen)
+
+
+def _running_profile_ids() -> list[int]:
+    """Profiles whose worker thread is alive AND whose stored status is 'running'."""
+    with _bot_lock:
+        candidates = [pid for pid, t in _bot_threads.items() if t.is_alive()]
+    return [pid for pid in candidates
+            if db.get_profile_config(pid, "bot_status") == "running"]
+
+
+def _required_intervals_union() -> list[str]:
+    """Union of timeframes required across all running profiles. 5m is always in."""
+    tfs: set[str] = {"5m"}
+    for pid in _running_profile_ids():
+        try:
+            tfs.update(get_required_timeframes(profile_id=pid))
+        except Exception:
+            log.exception("required_intervals_union: profile %s", pid)
+    return sorted(tfs)
+
+
+def _refresh_candle_manager_assets():
+    """Create/update/teardown the singleton candle manager based on active profiles.
+
+    Safe to call concurrently — `_candle_mgr_lock` serializes lifecycle changes.
+    """
+    global candle_mgr
+    with _candle_mgr_lock:
+        union = _union_assets()
+        intervals = _required_intervals_union()
+        if not union:
+            if candle_mgr is not None:
+                try:
+                    candle_mgr.stop()
+                except Exception:
+                    log.exception("Error stopping candle manager")
+                candle_mgr = None
+                log.info("Candle manager torn down — no running profiles")
+            return
+        if candle_mgr is None:
+            cfg = db.get_all_config()
+            selected_exchange = cfg.get("selected_exchange", "lighter")
+            use_lighter_ws = (cfg.get("use_lighter_ws_candles", "true").lower() == "true")
+            # Build a client just for the candle manager's REST seed when on Lighter
+            # — uses profile 1 by default (Lighter REST is auth-less for candle reads).
+            sample_pid = next(iter(_bot_clients), 1)
+            sample_client = _bot_clients.get(sample_pid)
+            if selected_exchange == "lighter" and use_lighter_ws and sample_client is not None:
+                log.info("Spawning shared LighterCandleManager assets=%s intervals=%s", union, intervals)
+                candle_mgr = LighterCandleManager(
+                    client=sample_client,
+                    assets=union,
+                    intervals=intervals,
+                    on_candle_close=_on_candle_close_dispatch,
+                )
+            else:
+                log.info("Spawning shared BinanceCandleManager assets=%s intervals=%s", union, intervals)
+                candle_mgr = BinanceCandleManager(
+                    union, on_candle_close=_on_candle_close_dispatch,
+                    intervals=intervals,
+                )
+            candle_mgr.start()
+        else:
+            try:
+                candle_mgr.update_assets(union)
+            except Exception:
+                log.exception("update_assets failed")
+
+
+def _build_cfg_for_profile(profile_id: int) -> dict:
+    """Per-profile cfg dict (risk + sizing + global flags) the worker uses."""
+    cfg = dict(db.get_all_config())  # base globals (debug flags, fee_rate, etc.)
+    for key in ("risk", "sizing"):
+        raw = db.get_profile_config(profile_id, key)
+        if raw:
+            try:
+                cfg[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+    return cfg
+
+
+def _on_candle_close_dispatch(asset: str, interval: str):
+    """Singleton callback wired into the shared candle manager.
+
+    Gated to 5m — 15m/30m/1h/4h/1d boundaries always coincide with a 5m close
+    and `process_asset` detects each higher TF internally. Fan-outs to every
+    running profile that watches this asset.
+    """
+    if interval != "5m":
+        return
+    # Snapshot ts caches OUTSIDE the lock to avoid blocking the candle thread.
+    last_15m_ts = db.get_last_candle_ts("15m")
+    last_30m_ts = db.get_last_candle_ts("30m")
+    last_1h_ts  = db.get_last_candle_ts("1h")
+    last_4h_ts  = db.get_last_candle_ts("4h")
+    last_1d_ts  = db.get_last_candle_ts("1d")
+    for pid in _running_profile_ids():
+        client = _bot_clients.get(pid)
+        if client is None:
+            continue
+        cfg = _build_cfg_for_profile(pid)
+        # Profile filter: only act if this asset is in the profile's universe.
+        try:
+            assets_raw = db.get_profile_config(pid, "assets") or cfg.get("monitored_assets", "[]")
+            profile_assets = json.loads(assets_raw)
+        except json.JSONDecodeError:
+            profile_assets = []
+        active_assets = set(get_active_assets(profile_assets, profile_id=pid))
+        if asset not in active_assets:
+            continue
+        try:
+            process_asset(
+                asset, cfg,
+                last_15m_ts, last_30m_ts, last_1h_ts, last_4h_ts, last_1d_ts,
+                profile_id=pid,
+            )
+        except Exception:
+            log.exception("[%s] process_asset failed for profile %s", asset, pid)
+
+
+def bot_loop(profile_id: int = 1):
+    """Per-profile worker loop.
+
+    Connects this profile's exchange client, builds its RiskManager and runs
+    the heartbeat that polls bot_status, TP/SL recovery and asset list changes.
+    The candle manager is a singleton owned by `_refresh_candle_manager_assets`
+    — this function does not create or tear it down; it only requests refreshes
+    when its own asset list shifts.
+    """
+    stop_event = _stop_events.get(profile_id)
+    if stop_event is None:
+        log.error("bot_loop called for profile %s without a stop_event registered", profile_id)
+        return
 
     cfg = db.get_all_config()
     debug = cfg.get("debug_logging", "false").lower() == "true"
@@ -60,6 +232,11 @@ def bot_loop(profile_id: int = 1):
     log.info("=" * 50)
     log.info(f"Hyperliquid Scalping Bot starting (profile {profile_id})...")
     log.info("=" * 50)
+
+    client = _bot_clients.get(profile_id)
+    if client is None:
+        log.error("bot_loop: no client registered for profile %s", profile_id)
+        return
 
     # Connect to exchange with retries
     _CONNECT_MAX_RETRIES = 5
@@ -77,12 +254,13 @@ def bot_loop(profile_id: int = 1):
                 db.set_profile_config(profile_id, "bot_status", "error")
                 return
             log.warning(f"Retrying connection in {delay}s...")
-            _stop_event.wait(delay)
-            if _stop_event.is_set():
+            stop_event.wait(delay)
+            if stop_event.is_set():
                 db.set_profile_config(profile_id, "bot_status", "stopped")
                 return
 
     risk_mgr = RiskManager(client, profile_id=profile_id)
+    _risk_mgrs[profile_id] = risk_mgr
     db.set_profile_config(profile_id, "bot_status", "running")
 
     cfg = db.get_all_config()
@@ -109,46 +287,13 @@ def bot_loop(profile_id: int = 1):
             f"1h={len(last_1h_ts)} 4h={len(last_4h_ts)} 1d={len(last_1d_ts)} assets"
         )
 
-    def on_candle_close(asset: str, interval: str):
-        # process_asset detecta TODOS os TFs internamente via _detect_new (5m, 15m,
-        # 30m, 1h, 4h, 1d). Como 15m/30m/1h/4h/1d boundaries são MÚLTIPLOS de 5m,
-        # eles sempre coincidem com um 5m boundary — basta disparar no 5m close pra
-        # processar tudo. Sem esse gate, o LighterCandleManager (que emite close
-        # para CADA tf subscrito) chama process_asset N vezes no mesmo boundary
-        # (ex: 23:30 dispara 5m + 30m → duas chamadas → "New 5m candle closed"
-        # duplicado por ativo).
-        if interval != "5m":
-            return
-        try:
-            current_cfg = db.get_all_config()
-            process_asset(asset, current_cfg,
-                          last_15m_ts, last_30m_ts, last_1h_ts, last_4h_ts, last_1d_ts,
-                          profile_id=profile_id)
-        except Exception as e:
-            log.error(f"[{asset}] on_candle_close error: {e}", exc_info=True)
-
-    active_intervals = get_required_timeframes(profile_id=profile_id)
-    log.info(f"Active strategy timeframes: {active_intervals}")
-    selected_exchange = cfg.get("selected_exchange", "lighter")
-    use_lighter_ws = (cfg.get("use_lighter_ws_candles", "true").lower() == "true")
-
-    if selected_exchange == "lighter" and use_lighter_ws:
-        log.info("Using LighterCandleManager (native WS) for candle feed")
-        candle_mgr = LighterCandleManager(
-            client=client,
-            assets=initial_assets,
-            intervals=active_intervals,
-            on_candle_close=on_candle_close,
-        )
-    else:
-        log.info(f"Using BinanceCandleManager (exchange={selected_exchange}, ws_flag={use_lighter_ws})")
-        candle_mgr = BinanceCandleManager(initial_assets, on_candle_close=on_candle_close,
-                                          intervals=active_intervals)
-    candle_mgr.start()
+    # Subscribe this profile's assets/timeframes on the shared candle manager.
+    _refresh_candle_manager_assets()
 
     _heartbeat_counter = 0
+    _last_asset_set: set[str] = set(initial_assets)
 
-    while not _stop_event.is_set():
+    while not stop_event.is_set():
         try:
             cfg = db.get_all_config()
             status = db.get_profile_config(profile_id, "bot_status") or "running"
@@ -158,41 +303,41 @@ def bot_loop(profile_id: int = 1):
                 break
 
             if status == "paused":
-                candle_mgr.pause()
-                _stop_event.wait(5)
+                # Shared candle manager keeps running for other profiles; this
+                # loop just idles until status flips back to "running" or stops.
+                stop_event.wait(5)
                 continue
-            else:
-                if candle_mgr._paused:
-                    candle_mgr.resume()
 
             set_debug(cfg.get("debug_logging", "false").lower() == "true")
 
             _heartbeat_counter += 1
             if _heartbeat_counter % 2 == 0:  # ~60s with wait(30)
-                log.info(f"Bot alive — cycle #{_heartbeat_counter}, monitoring: {candle_mgr._assets}")
+                log.info(f"[profile {profile_id}] Bot alive — cycle #{_heartbeat_counter}, "
+                         f"monitoring: {sorted(_last_asset_set)}")
 
-            # Check if asset list changed
+            # Check if this profile's asset list changed; refresh the shared candle
+            # manager so the union covers the new assets.
             assets_raw = cfg.get("monitored_assets", '["BTC","ETH","SOL"]')
             try:
                 global_assets = json.loads(assets_raw)
             except json.JSONDecodeError:
                 global_assets = ["BTC", "ETH", "SOL"]
-            current_assets = get_active_assets(global_assets, profile_id=profile_id)
-            if set(current_assets) != set(candle_mgr._assets):
-                log.info(f"Asset list changed -> {current_assets}")
-                candle_mgr.update_assets(current_assets)
+            current_assets = set(get_active_assets(global_assets, profile_id=profile_id))
+            if current_assets != _last_asset_set:
+                log.info(f"[profile {profile_id}] Asset list changed -> {sorted(current_assets)}")
+                _last_asset_set = current_assets
+                _refresh_candle_manager_assets()
 
             # Check TP/SL on open positions
             risk_mgr.check_open_positions_tp_sl()
 
-            _stop_event.wait(30)
+            stop_event.wait(30)
 
         except Exception as e:
             log.error(f"Bot loop error: {e}", exc_info=True)
-            _stop_event.wait(30)
+            stop_event.wait(30)
 
-    candle_mgr.stop()
-    log.info("Bot stopped.")
+    log.info(f"Bot stopped for profile {profile_id}.")
 
 
 def check_bb_mid_exit(asset: str, df_5m, profile_id: int = 1) -> None:
@@ -203,6 +348,9 @@ def check_bb_mid_exit(asset: str, df_5m, profile_id: int = 1) -> None:
     For SHORT: exits when candle closes <= BB midline.
     The exchange cancels TP/SL trigger orders automatically when position is closed.
     """
+    client = _bot_clients.get(profile_id)
+    if client is None:
+        return
     open_trades = db.get_open_trades(profile_id=profile_id)
     bb_trades = [t for t in open_trades
                  if t["asset"] == asset and (
@@ -284,7 +432,17 @@ def process_asset(asset: str, cfg: dict,
                   last_15m_ts: dict, last_30m_ts: dict,
                   last_1h_ts: dict, last_4h_ts: dict, last_1d_ts: dict,
                   profile_id: int = 1):
-    """Triggered on every 5m candle close by BinanceCandleManager worker thread."""
+    """Triggered on every 5m candle close by the shared candle manager.
+
+    Looks up the per-profile exchange client and risk manager from the global
+    dicts populated by `start_bot(profile_id)`. Returns silently if either is
+    missing — this can happen if a bot was stopped between the candle close
+    fire and dispatch.
+    """
+    client = _bot_clients.get(profile_id)
+    risk_mgr = _risk_mgrs.get(profile_id)
+    if client is None or risk_mgr is None:
+        return
     # All timeframes fetched via exchange client (Lighter uses its own REST feed;
     # Hyperliquid delegates to Binance REST — same source as before)
     df_1m = client.get_candles(asset, "1m", count=100)
@@ -305,7 +463,7 @@ def process_asset(asset: str, cfg: dict,
             log.candle(f"[{asset}] No candle data after retry")
             return
 
-    active = set(candle_mgr.intervals)
+    active = set(candle_mgr.intervals) if candle_mgr is not None else {"5m"}
     df_15m = client.get_candles(asset, "15m", count=300) if "15m" in active else pd.DataFrame()
     df_30m = client.get_candles(asset, "30m", count=300) if "30m" in active else pd.DataFrame()
     df_1h  = client.get_candles(asset, "1h",  count=300) if "1h"  in active else pd.DataFrame()
@@ -395,42 +553,93 @@ def process_asset(asset: str, cfg: dict,
 
 
 def start_bot(profile_id: int = 1):
-    """Start the bot in a background thread (guards against duplicate threads).
+    """Spawn this profile's worker thread.
 
-    Single-thread today. Phase 4 turns _bot_thread / _stop_event into dicts
-    keyed by profile_id so multiple profiles can run in parallel.
+    Idempotent: returns the existing thread if one is already running for the
+    given profile_id. Builds a fresh exchange client and stop event for the
+    profile, persists them in the global dicts, then triggers a candle manager
+    refresh so the new asset universe gets subscribed.
     """
-    global _bot_thread
-    if _bot_thread is not None and _bot_thread.is_alive():
-        log.warning("Bot thread already running — ignoring duplicate start_bot() call")
-        return _bot_thread
-    _stop_event.clear()
-    _bot_thread = threading.Thread(
-        target=bot_loop, args=(profile_id,), daemon=True, name=f"bot-loop-p{profile_id}",
-    )
-    _bot_thread.start()
-    return _bot_thread
+    with _bot_lock:
+        existing = _bot_threads.get(profile_id)
+        if existing is not None and existing.is_alive():
+            log.warning("Bot thread already running for profile %s — ignoring start_bot()", profile_id)
+            return existing
+        try:
+            _bot_clients[profile_id] = _build_client_for_profile(profile_id)
+        except Exception:
+            log.exception("Failed to build exchange client for profile %s", profile_id)
+            db.set_profile_config(profile_id, "bot_status", "error")
+            return None
+        _stop_events[profile_id] = threading.Event()
+        t = threading.Thread(
+            target=bot_loop, args=(profile_id,),
+            daemon=True, name=f"bot-loop-p{profile_id}",
+        )
+        _bot_threads[profile_id] = t
+        t.start()
+    db.set_profile_config(profile_id, "bot_status", "running")
+    _refresh_candle_manager_assets()
+    return t
 
 
 def stop_bot(profile_id: int = 1):
-    """Signal the bot to stop."""
-    _stop_event.set()
+    """Signal this profile's worker to stop and schedule reaper cleanup.
+
+    The reaper thread joins the worker (with a timeout), tears down the client,
+    removes the profile from the dicts and refreshes the candle manager (which
+    will stop the singleton if no profile remains).
+    """
+    with _bot_lock:
+        ev = _stop_events.get(profile_id)
+    if ev is not None:
+        ev.set()
     db.set_profile_config(profile_id, "bot_status", "stopped")
-    log.info("Stop signal sent to bot")
+    log.info("Stop signal sent to bot of profile %s", profile_id)
+    threading.Thread(
+        target=_reap_bot_thread, args=(profile_id,),
+        daemon=True, name=f"bot-reaper-p{profile_id}",
+    ).start()
 
 
 def pause_bot(profile_id: int = 1):
     db.set_profile_config(profile_id, "bot_status", "paused")
-    log.info("Bot paused")
+    log.info("Bot paused (profile %s)", profile_id)
 
 
 def resume_bot(profile_id: int = 1):
     db.set_profile_config(profile_id, "bot_status", "running")
-    log.info("Bot resumed")
+    log.info("Bot resumed (profile %s)", profile_id)
 
 
 def get_bot_status(profile_id: int = 1) -> str:
     return db.get_profile_config(profile_id, "bot_status") or "stopped"
+
+
+def _reap_bot_thread(profile_id: int):
+    """Join the worker, disconnect its client and clean up dicts.
+
+    Called from `stop_bot` in a background thread so HTTP /api/.../stop can
+    return immediately. Best-effort: a stuck worker is logged but does not
+    block the reaper from cleaning the dicts after the join timeout.
+    """
+    with _bot_lock:
+        t = _bot_threads.get(profile_id)
+    if t is not None:
+        t.join(timeout=15)
+        if t.is_alive():
+            log.warning("Bot thread for profile %s did not exit within 15s — abandoning", profile_id)
+    with _bot_lock:
+        client = _bot_clients.pop(profile_id, None)
+        _bot_threads.pop(profile_id, None)
+        _stop_events.pop(profile_id, None)
+        _risk_mgrs.pop(profile_id, None)
+    if client is not None:
+        try:
+            client.disconnect()
+        except Exception:
+            log.exception("Disconnect failed for profile %s", profile_id)
+    _refresh_candle_manager_assets()
 
 
 # Allow running standalone
