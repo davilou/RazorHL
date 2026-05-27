@@ -43,6 +43,83 @@ def _apply_ema_filter(sig_long: np.ndarray, sig_short: np.ndarray,
     return sig_long & valid & (close > ema), sig_short & valid & (close < ema)
 
 
+# ── Scanner v2 filter dimensions (adx / session / atr-TP-SL) ──────────────
+# Família de tendência: ADX alto = bom. Família de mean reversion: ADX baixo = bom.
+# Espelhamos scanner_v2._TREND_FAMILIES (que usa nomes "EMA_Cross", "MACD_Cross").
+_TREND_FAMILIES_FAST: set[str] = {"ema_cross", "macd_cross"}
+_ATR_PERIOD_DEFAULT = 14
+
+
+def _build_adx_mask(high_s, low_s, close_s, n: int,
+                    adx_period: int, adx_min: float,
+                    is_trend_family: bool) -> np.ndarray | None:
+    """Retorna mask booleana por candle (True = entrada permitida) ou None se filtro off.
+
+    Família trend: ADX >= adx_min. Mean reversion: ADX < adx_min.
+    """
+    if adx_period <= 0:
+        return None
+    df = ta.adx(high_s, low_s, close_s, length=adx_period)
+    adx_col = [c for c in df.columns if c.startswith("ADX_")]
+    if not adx_col:
+        return None
+    adx = df[adx_col[0]].values.astype(float)
+    finite = ~np.isnan(adx)
+    if is_trend_family:
+        return finite & (adx >= adx_min)
+    return finite & (adx < adx_min)
+
+
+def _build_session_mask(ts: np.ndarray, hour_start_utc: int, hour_end_utc: int) -> np.ndarray | None:
+    """Mask True nos candles cuja hora UTC ∈ [start, end). (0, 24) → None (sem filtro)."""
+    if hour_start_utc == 0 and hour_end_utc == 24:
+        return None
+    hours = ((ts // (60 * 60 * 1000)) % 24).astype(int)
+    return (hours >= hour_start_utc) & (hours < hour_end_utc)
+
+
+def _resolve_atr_distances(close: np.ndarray, high_s, low_s, close_s,
+                            atr_mode: bool, atr_tp_mult: float, atr_sl_mult: float,
+                            atr_period: int = _ATR_PERIOD_DEFAULT
+                           ) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Quando atr_tp_mode=True, devolve (tp_dist, sl_dist) em PREÇO absoluto.
+    Caso contrário (None, None) → simulador usa tp_pct/sl_pct fixos."""
+    if not atr_mode:
+        return None, None
+    atr = ta.atr(high_s, low_s, close_s, length=atr_period)
+    if atr is None:
+        return None, None
+    atr_arr = atr.values.astype(float)
+    tp_dist = atr_arr * float(atr_tp_mult)
+    sl_dist = atr_arr * float(atr_sl_mult)
+    return tp_dist, sl_dist
+
+
+def _apply_v2_filters(sig_long: np.ndarray, sig_short: np.ndarray,
+                       close_s, high_s, low_s, ts: np.ndarray,
+                       params: dict, family: str
+                      ) -> tuple[np.ndarray, np.ndarray]:
+    """Aplica adx_mask + session_mask aos sinais. Defaults = sem filtro
+    (instâncias legadas pré-v2 não têm esses campos → comportamento idêntico ao engine antigo)."""
+    adx_period = int(params.get("adx_period", 0) or 0)
+    adx_min = float(params.get("adx_min", 0) or 0)
+    sess_start = int(params.get("session_start", 0) or 0)
+    sess_end = int(params.get("session_end", 24) or 24)
+    is_trend = family in _TREND_FAMILIES_FAST
+
+    n = len(close_s)
+    adx_mask = _build_adx_mask(high_s, low_s, close_s, n, adx_period, adx_min, is_trend)
+    sess_mask = _build_session_mask(ts, sess_start, sess_end)
+
+    if adx_mask is not None:
+        sig_long = sig_long & adx_mask
+        sig_short = sig_short & adx_mask
+    if sess_mask is not None:
+        sig_long = sig_long & sess_mask
+        sig_short = sig_short & sess_mask
+    return sig_long, sig_short
+
+
 def _add_pnl(raw_trades: list[dict], trade_size_usd: float, fee_rate: float) -> list[dict]:
     """Identical to engine._add_pnl — duplicated to keep the modules decoupled."""
     result = []
@@ -60,7 +137,8 @@ def _add_pnl(raw_trades: list[dict], trade_size_usd: float, fee_rate: float) -> 
 # ── Public API ─────────────────────────────────────────────────────────────
 
 def start_backtest_job(strategy_name: str, asset: str, days: int,
-                       trade_size_usd: float, fee_rate: float) -> str:
+                       trade_size_usd: float, fee_rate: float,
+                       profile_id: int = 1) -> str:
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {
@@ -70,13 +148,14 @@ def start_backtest_job(strategy_name: str, asset: str, days: int,
             "strategy": strategy_name,
             "asset": asset,
             "days": days,
+            "profile_id": profile_id,
             "result": None,
             "error": None,
             "elapsed_s": None,
         }
     t = threading.Thread(
         target=_run_job,
-        args=(job_id, strategy_name, asset, days, trade_size_usd, fee_rate),
+        args=(job_id, strategy_name, asset, days, trade_size_usd, fee_rate, profile_id),
         daemon=True,
     )
     t.start()
@@ -89,7 +168,7 @@ def get_job(job_id: str) -> dict | None:
 
 
 def _run_job(job_id: str, strategy_name: str, asset: str, days: int,
-             trade_size_usd: float, fee_rate: float):
+             trade_size_usd: float, fee_rate: float, profile_id: int = 1):
     started = time.time()
     try:
         with _jobs_lock:
@@ -97,7 +176,8 @@ def _run_job(job_id: str, strategy_name: str, asset: str, days: int,
             _jobs[job_id]["progress"] = "Iniciando..."
 
         result = _run_backtest(strategy_name, asset, days, trade_size_usd, fee_rate,
-                                    progress_cb=lambda m: _set_progress(job_id, m))
+                                    progress_cb=lambda m: _set_progress(job_id, m),
+                                    profile_id=profile_id)
         elapsed = round(time.time() - started, 3)
         with _jobs_lock:
             _jobs[job_id]["status"] = "done"
@@ -201,7 +281,8 @@ def _resolve_strategy_instance(strategy_name: str, asset: str) -> str:
     return resolved
 
 
-def _run_backtest(strategy_name, asset, days, trade_size_usd, fee_rate, progress_cb=None):
+def _run_backtest(strategy_name, asset, days, trade_size_usd, fee_rate, progress_cb=None,
+                  profile_id: int = 1):
     from bot import db as bot_db
     from bot.strategies.manager import STRATEGY_MAP
 
@@ -210,7 +291,8 @@ def _run_backtest(strategy_name, asset, days, trade_size_usd, fee_rate, progress
     family = _resolve_family(strategy_name)
     fn = _FAMILY_FNS[family]
 
-    params = {**strategy.DEFAULT_PARAMS, **bot_db.get_strategy_config(strategy_name)["params"]}
+    params = {**strategy.DEFAULT_PARAMS,
+              **bot_db.get_strategy_config(strategy_name, profile_id=profile_id)["params"]}
 
     # TF vem dos params da instância (scanner aplicou via timeframe="1h" etc).
     # Fallback "5m" para instâncias hardcoded legadas sem o campo.
@@ -235,6 +317,33 @@ def _run_backtest(strategy_name, asset, days, trade_size_usd, fee_rate, progress
     if progress_cb: progress_cb(f"Computando sinais ({family})...")
     sig_long, sig_short, bb_mid, sl_dist = fn(close, high, low, close_s, high_s, low_s, params)
 
+    # ── Filtros do scanner v2 (ADX, session, ATR-TP/SL) ────────────────────
+    # Instâncias antigas (sem esses params) caem no fallback default = sem filtro.
+    sig_long, sig_short = _apply_v2_filters(
+        sig_long, sig_short, close_s, high_s, low_s, ts, params, family,
+    )
+    _atr_mode = str(params.get("atr_tp_mode", False)).lower() not in ("false", "0", "no", "")
+    if _atr_mode:
+        tp_dist_v2, sl_dist_v2 = _resolve_atr_distances(
+            close, high_s, low_s, close_s,
+            atr_mode=True,
+            atr_tp_mult=float(params.get("atr_tp_mult", 1.0) or 1.0),
+            atr_sl_mult=float(params.get("atr_sl_mult", 1.0) or 1.0),
+            atr_period=int(params.get("atr_period", _ATR_PERIOD_DEFAULT) or _ATR_PERIOD_DEFAULT),
+        )
+        # ATR mode sobrescreve QUALQUER sl_dist da família (ex: EMA_Cross use_atr_sl)
+        # porque o scanner v2 manda ambos os lados (TP e SL) virem do ATR juntos.
+        if tp_dist_v2 is not None:
+            tp_dist = tp_dist_v2
+            sl_dist = sl_dist_v2
+    else:
+        tp_dist = None
+    log.backtest(
+        f"[backtest] v2 filters: adx_period={params.get('adx_period',0)} "
+        f"adx_min={params.get('adx_min',0)} session=[{params.get('session_start',0)},{params.get('session_end',24)}) "
+        f"atr_tp_mode={_atr_mode} entries_long={int(sig_long.sum())} entries_short={int(sig_short.sum())}"
+    )
+
     tp_pct = float(params["tp_pct"])
     sl_pct = float(params["sl_pct"])
 
@@ -242,7 +351,7 @@ def _run_backtest(strategy_name, asset, days, trade_size_usd, fee_rate, progress
     raw_trades = _simulate_fast(
         sig_long, sig_short, close, high, low, ts,
         tp_pct=tp_pct, sl_pct=sl_pct,
-        bb_mid=bb_mid, sl_dist=sl_dist,
+        bb_mid=bb_mid, sl_dist=sl_dist, tp_dist=tp_dist,
         strategy_name=strategy_name,
     )
 
@@ -471,6 +580,7 @@ def _simulate_fast(
     sl_pct: float,
     bb_mid: np.ndarray | None = None,
     sl_dist: np.ndarray | None = None,
+    tp_dist: np.ndarray | None = None,
     strategy_name: str = "",
 ) -> list[dict]:
     """
@@ -481,6 +591,8 @@ def _simulate_fast(
     bb_mid: float array of BB midline values, or None to skip BB mid exit.
     sl_dist: per-candle absolute SL distance in price (for ATR-based SL),
              or None to use sl_pct.
+    tp_dist: per-candle absolute TP distance in price (for ATR-based TP),
+             or None to use tp_pct. Both should be provided together when atr_tp_mode=True.
     """
     trades: list[dict] = []
     N = len(close)
@@ -498,7 +610,10 @@ def _simulate_fast(
             sl_abs = float(sl_dist[i])
         else:
             sl_abs = entry * sl_pct / 100.0
-        tp_abs = entry * tp_pct / 100.0
+        if tp_dist is not None and not np.isnan(tp_dist[i]):
+            tp_abs = float(tp_dist[i])
+        else:
+            tp_abs = entry * tp_pct / 100.0
 
         if side == "long":
             tp = entry + tp_abs

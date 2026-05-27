@@ -885,15 +885,17 @@ _METRIC_KEYS = {"trades", "wr", "pf", "roi", "tpd", "max_dd", "approved"}
 
 
 def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None,
-                 timeframe: str = "5m") -> dict:
-    """Apply scanner result params to the matching live strategy instance.
+                 timeframe: str = "5m", profile_id: int = 1) -> dict:
+    """Apply scanner result params to the matching live strategy instance of
+    a given profile.
+
     - timeframe: 5m/15m/30m/1h — sempre vai no nome da instância dinâmica
     - tag opcional: cria versão nomeada `{prefix}_{asset}_{tf}_{tag_slug}`
     - sem tag: instância `{prefix}_{asset}_{tf}` (atualiza/sobrescreve esse TF)
     - Cria instância dinâmica se não houver registrada
-    - Salva params traduzidos (inclui timeframe) em strategy.{name}.params
-    - Salva métricas + raw scanner params em strategy.{name}.scanner_metrics (inclui tf e tag)
-    - Auto-ativa (enabled=true)
+    - Salva params traduzidos (inclui timeframe) em profile.<id>.strategy.{name}.params
+    - Salva métricas + raw scanner params em profile.<id>.strategy.{name}.scanner_metrics
+    - Auto-ativa (enabled=true) NO PERFIL
     """
     import json as _json
     from datetime import datetime, timezone
@@ -903,7 +905,7 @@ def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None
     asset_u = asset.upper()
     if timeframe not in SUPPORTED_TIMEFRAMES:
         return {"error": f"Timeframe inválido: {timeframe}"}
-    log.info(f"[scanner] apply_result chamado: strategy={strategy!r} asset={asset_u!r} tf={timeframe} tag={tag!r}")
+    log.info(f"[scanner] apply_result chamado: profile={profile_id} strategy={strategy!r} asset={asset_u!r} tf={timeframe} tag={tag!r}")
     # Sempre cria/atualiza instância dinâmica com TF no nome.
     # Legado: instâncias hardcoded sem TF (bb_stoch_btc, etc) NÃO são tocadas — novos applies criam bb_stoch_btc_5m.
     instance = manager.register_dynamic_instance(strategy, asset_u, tag=tag, timeframe=timeframe)
@@ -918,7 +920,7 @@ def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None
     translated["assets"] = [asset_u]
     translated["timeframe"] = timeframe   # estratégia live usa esse param para escolher o df
 
-    existing = db.get_strategy_config(instance)
+    existing = db.get_strategy_config(instance, profile_id=profile_id)
     merged = {**(existing.get("params") or {}), **translated}
 
     # Separa métricas dos params raw do scanner (para exibir no card)
@@ -938,12 +940,12 @@ def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None
         "max_dd":         params.get("max_dd"),
     }
 
-    db.set_configs({
+    db.set_profile_configs(profile_id, {
         f"strategy.{instance}.params":          _json.dumps(merged),
         f"strategy.{instance}.scanner_metrics": _json.dumps(scanner_metrics),
         f"strategy.{instance}.enabled":         "true",
     })
-    log.info(f"[scanner] Aplicado {strategy}/{asset_u} → {instance} (auto-enabled)")
+    log.info(f"[scanner] Aplicado profile={profile_id} {strategy}/{asset_u} → {instance} (auto-enabled)")
     return {"ok": True, "instance": instance, "params": translated, "metrics": scanner_metrics}
 
 

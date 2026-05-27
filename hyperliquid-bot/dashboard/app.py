@@ -304,6 +304,7 @@ def create_app():
             int(data.get("days", 90)),
             float(data.get("trade_size_usd", 1000.0)),
             float(data.get("fee_rate", 0.0009)),
+            profile_id=g.profile_id,
         )
         return jsonify({"job_id": job_id})
 
@@ -441,6 +442,7 @@ def create_app():
             data.get("params", {}),
             tag=data.get("tag"),
             timeframe=data.get("timeframe", "5m"),
+            profile_id=g.profile_id,
         )
         if "error" in result:
             return jsonify(result), 400
@@ -521,6 +523,7 @@ def create_app():
             data.get("params", {}),
             tag=data.get("tag"),
             timeframe=data.get("timeframe", "5m"),
+            profile_id=g.profile_id,
         )
         if "error" in result:
             return jsonify(result), 400
