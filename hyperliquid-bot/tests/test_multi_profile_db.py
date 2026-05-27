@@ -142,6 +142,54 @@ def test_create_profile_rejects_duplicate_lighter_account(tmp_path, monkeypatch)
         db.create_profile(name="B", exchange="lighter", credentials={"lighter_account_index": "111"})
 
 
+def _trade_dict(**overrides):
+    base = {
+        "asset": "BTC", "side": "long",
+        "entry_price": 100.0, "size": 0.1,
+        "entry_time": "2026-05-27T00:00:00",
+        "ema9": None, "ema21": None, "rsi2": None,
+        "volume": None, "atr": None, "funding_rate": None,
+        "tp_price": None, "sl_price": None, "order_id": None,
+        "strategy": "x",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_trades_signals_logs_are_scoped_by_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    _reset_conn()
+    db.init_db()
+    pid2 = db.create_profile(name="P2", exchange="lighter", credentials={})
+    # Insert trades on both profiles
+    db.insert_trade(_trade_dict(profile_id=1, asset="BTC", strategy="x"))
+    db.insert_trade(_trade_dict(profile_id=pid2, asset="ETH",
+                                entry_price=200.0, size=0.5, strategy="y"))
+    p1 = db.get_open_trades(profile_id=1)
+    p2 = db.get_open_trades(profile_id=pid2)
+    assert len(p1) == 1 and p1[0]["asset"] == "BTC"
+    assert len(p2) == 1 and p2[0]["asset"] == "ETH"
+    # Default (no profile filter) returns both
+    assert len(db.get_open_trades()) == 2
+
+
+def test_insert_log_with_profile_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    _reset_conn()
+    db.init_db()
+    pid2 = db.create_profile(name="P2", exchange="lighter", credentials={})
+    db.insert_log("2026-05-27", "INFO", "bot", "global log")  # no profile -> NULL
+    db.insert_log("2026-05-27", "INFO", "bot", "p1 log", profile_id=1)
+    db.insert_log("2026-05-27", "INFO", "bot", "p2 log", profile_id=pid2)
+    # profile_id=1 returns global (NULL) + own
+    p1_msgs = {r["message"] for r in db.get_logs(profile_id=1)}
+    assert {"global log", "p1 log"} <= p1_msgs
+    assert "p2 log" not in p1_msgs
+    # profile_id=None returns everything
+    all_msgs = {r["message"] for r in db.get_logs(profile_id=None)}
+    assert {"global log", "p1 log", "p2 log"} <= all_msgs
+
+
 def test_strategy_config_by_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
     _reset_conn()

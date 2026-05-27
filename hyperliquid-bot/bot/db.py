@@ -698,11 +698,12 @@ def insert_trade(trade: dict) -> int:
     trade.setdefault("open_fee", 0.0)
     trade.setdefault("strategy", "mean_reversion")
     trade.setdefault("signal_price", None)
+    trade.setdefault("profile_id", 1)
     cur = conn.execute("""
-        INSERT INTO trades (asset, side, entry_price, size, status, entry_time,
+        INSERT INTO trades (profile_id, asset, side, entry_price, size, status, entry_time,
                             ema9, ema21, rsi2, volume, atr, funding_rate, tp_price, sl_price, order_id,
                             fees, strategy, signal_price)
-        VALUES (:asset, :side, :entry_price, :size, 'open', :entry_time,
+        VALUES (:profile_id, :asset, :side, :entry_price, :size, 'open', :entry_time,
                 :ema9, :ema21, :rsi2, :volume, :atr, :funding_rate, :tp_price, :sl_price, :order_id,
                 :open_fee, :strategy, :signal_price)
     """, trade)
@@ -722,8 +723,21 @@ def close_trade(trade_id: int, exit_price: float, pnl: float, pnl_pct: float,
     conn.commit()
 
 
-def get_open_trades() -> list[dict]:
-    rows = get_conn().execute("SELECT * FROM trades WHERE status = 'open'").fetchall()
+def get_open_trades(profile_id: int | None = None) -> list[dict]:
+    """Open trades, optionally scoped to a single profile.
+
+    profile_id=None returns every profile's open trades (used by audit scripts);
+    pass an explicit id from the bot loop.
+    """
+    if profile_id is None:
+        rows = get_conn().execute(
+            "SELECT * FROM trades WHERE status = 'open'"
+        ).fetchall()
+    else:
+        rows = get_conn().execute(
+            "SELECT * FROM trades WHERE status = 'open' AND profile_id = ?",
+            (profile_id,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -792,8 +806,8 @@ def get_trade_stats() -> dict:
     }
 
 
-def get_strategy_stats(days: int | None = None) -> list[dict]:
-    """Return trades count, wins, win_rate and pnl per strategy.
+def get_strategy_stats(days: int | None = None, profile_id: int = 1) -> list[dict]:
+    """Return trades count, wins, win_rate and pnl per strategy for one profile.
     Includes strategies that have open trades so cards appear immediately.
     wins/pnl are computed from closed trades only; total counts all trades.
     Optional `days` limits closed-trade stats to the last N days.
@@ -816,14 +830,16 @@ def get_strategy_stats(days: int | None = None) -> list[dict]:
                        THEN (signal_price - entry_price) / signal_price * 100
                END) as avg_slippage_pct
         FROM trades
-        WHERE strategy IS NOT NULL {date_filter}
+        WHERE profile_id = ? AND strategy IS NOT NULL {date_filter}
         GROUP BY strategy
-    """).fetchall()
+    """, (profile_id,)).fetchall()
+    enabled_prefix = f"profile.{profile_id}.strategy."
     enabled_rows = conn.execute(
-        "SELECT key, value FROM config WHERE key LIKE 'strategy.%.enabled'"
+        "SELECT key, value FROM config WHERE key LIKE ?",
+        (f"{enabled_prefix}%.enabled",),
     ).fetchall()
     enabled_map = {
-        er["key"].split(".", 2)[1].rsplit(".enabled", 1)[0]: (er["value"] == "true")
+        er["key"][len(enabled_prefix):].rsplit(".enabled", 1)[0]: (er["value"] == "true")
         for er in enabled_rows
     }
     return [
@@ -847,11 +863,12 @@ def get_strategy_stats(days: int | None = None) -> list[dict]:
 def insert_signal(signal: dict) -> int:
     conn = get_conn()
     signal.setdefault("strategy_name", "mean_reversion")
+    signal.setdefault("profile_id", 1)
     cur = conn.execute("""
-        INSERT INTO signals (timestamp, asset, side, executed, reason,
+        INSERT INTO signals (profile_id, timestamp, asset, side, executed, reason,
                              ema9, ema21, rsi2, volume, volume_avg, atr, funding_rate,
                              strategy_name)
-        VALUES (:timestamp, :asset, :side, :executed, :reason,
+        VALUES (:profile_id, :timestamp, :asset, :side, :executed, :reason,
                 :ema9, :ema21, :rsi2, :volume, :volume_avg, :atr, :funding_rate,
                 :strategy_name)
     """, signal)
@@ -898,21 +915,34 @@ def set_strategy_config(strategy_name: str, enabled: bool, params: dict, profile
 
 # ── Logs helpers ────────────────────────────────────────────────────
 
-def insert_log(timestamp: str, level: str, module: str, message: str):
+def insert_log(timestamp: str, level: str, module: str, message: str,
+               profile_id: int | None = None):
+    """Insert a log row. profile_id=None marks the row as global (candle manager,
+    migrations, anything not owned by a specific profile)."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO logs (timestamp, level, module, message) VALUES (?, ?, ?, ?)",
-        (timestamp, level, module, message),
+        "INSERT INTO logs (profile_id, timestamp, level, module, message) VALUES (?, ?, ?, ?, ?)",
+        (profile_id, timestamp, level, module, message),
     )
     conn.commit()
 
 
-def get_logs(limit: int = 200, level: str = None) -> list[dict]:
+def get_logs(limit: int = 200, level: str = None,
+             profile_id: int | None = None) -> list[dict]:
+    """Return recent logs.
+
+    profile_id=None returns every row (global view).
+    profile_id=<id> returns rows owned by that profile OR with NULL profile_id
+    (global logs always appear, so candle-manager messages remain visible).
+    """
     query = "SELECT * FROM logs WHERE 1=1"
     params = []
     if level:
         query += " AND level = ?"
         params.append(level)
+    if profile_id is not None:
+        query += " AND (profile_id IS NULL OR profile_id = ?)"
+        params.append(profile_id)
     query += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     rows = get_conn().execute(query, params).fetchall()
