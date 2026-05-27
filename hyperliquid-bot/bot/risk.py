@@ -17,8 +17,9 @@ log = get_logger("risk")
 
 
 class RiskManager:
-    def __init__(self, client: BaseExchangeClient):
+    def __init__(self, client: BaseExchangeClient, profile_id: int = 1):
         self.client = client
+        self.profile_id = profile_id
 
     def _cfg(self) -> dict:
         return db.get_all_config()
@@ -30,9 +31,9 @@ class RiskManager:
         """
         cfg = self._cfg()
 
-        # 1. Check max positions
+        # 1. Check max positions (scoped to this profile)
         max_pos = int(cfg.get("max_positions", 2))
-        open_trades = db.get_open_trades()
+        open_trades = db.get_open_trades(profile_id=self.profile_id)
         if len(open_trades) >= max_pos:
             reason = f"Max positions reached ({len(open_trades)}/{max_pos})"
             log.warning(f"[{asset}] Trade blocked: {reason}")
@@ -60,7 +61,7 @@ class RiskManager:
         if daily_loss_pct >= max_daily_loss_pct:
             reason = f"Daily loss limit hit: {daily_loss_pct:.2f}% >= {max_daily_loss_pct}%"
             log.warning(f"Trade blocked: {reason}")
-            db.set_config("bot_status", "paused")
+            db.set_profile_config(self.profile_id, "bot_status", "paused")
             return False, reason
 
         return True, "OK"
@@ -130,8 +131,9 @@ class RiskManager:
         """
         Check if any open trades have been closed by TP/SL on the exchange.
         If the exchange position no longer exists, close the trade record.
+        Scoped to this RiskManager's profile.
         """
-        open_trades = db.get_open_trades()
+        open_trades = db.get_open_trades(profile_id=self.profile_id)
         if not open_trades:
             return
 

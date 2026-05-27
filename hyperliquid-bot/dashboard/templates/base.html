@@ -19,6 +19,25 @@
       </svg>
       <span class="brand-text">RazorHL</span>
     </div>
+
+    <!-- Profile selector -->
+    <div class="profile-selector" id="profileSelector">
+      <button type="button" class="profile-current" id="profileCurrentBtn" aria-haspopup="true" aria-expanded="false">
+        <span class="profile-status-dot" id="profileStatusDot"></span>
+        <span class="profile-current-name" id="profileCurrentName">…</span>
+        <span class="caret">▾</span>
+      </button>
+      <div class="profile-menu" id="profileMenu" hidden>
+        <ul class="profile-list" id="profileList"></ul>
+        <div class="profile-actions">
+          <button type="button" data-action="rename">✎ Renomear perfil ativo</button>
+          <button type="button" data-action="edit-creds">⚙ Editar credenciais</button>
+          <button type="button" data-action="delete">🗑 Excluir perfil ativo</button>
+          <button type="button" data-action="new">+ Novo perfil</button>
+        </div>
+      </div>
+    </div>
+
     <ul class="nav-list">
       <li>
         <a href="/" class="nav-link {% if page == 'overview' %}active{% endif %}" aria-current="{% if page == 'overview' %}page{% endif %}">
@@ -99,6 +118,39 @@
   <main class="main-content">
     {% block content %}{% endblock %}
   </main>
+
+  <!-- Profile modal (create/rename/edit-credentials) -->
+  <div class="modal-backdrop" id="profileModalBackdrop" hidden>
+    <div class="modal" id="profileModal" role="dialog" aria-labelledby="profileModalTitle">
+      <h3 id="profileModalTitle">Novo perfil</h3>
+      <form id="profileForm" autocomplete="off">
+        <label>Nome
+          <input name="name" type="text" required>
+        </label>
+        <label>Exchange
+          <select name="exchange">
+            <option value="lighter">Lighter</option>
+            <option value="hyperliquid">Hyperliquid</option>
+          </select>
+        </label>
+        <fieldset class="creds creds-lighter">
+          <legend>Lighter</legend>
+          <label>Wallet Address <input name="lighter_wallet_address" type="text"></label>
+          <label>Public Key <input name="lighter_public_key" type="password"></label>
+          <label>Private Key <input name="lighter_private_key" type="password"></label>
+        </fieldset>
+        <fieldset class="creds creds-hl" hidden>
+          <legend>Hyperliquid</legend>
+          <label>Address <input name="hyperliquid_address" type="text"></label>
+          <label>Secret <input name="hyperliquid_secret" type="password"></label>
+        </fieldset>
+        <div class="modal-actions">
+          <button type="button" data-close>Cancelar</button>
+          <button type="submit">Salvar</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>

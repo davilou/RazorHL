@@ -116,7 +116,8 @@ def size_to_int(size: float, decimals: int) -> int:
 
 class LighterExchangeClient(BaseExchangeClient):
 
-    def __init__(self):
+    def __init__(self, profile_id: int = 1):
+        self._profile_id = profile_id
         self._wallet_address: str = ""
         self._public_key: str = ""
         self._private_key: str = ""
@@ -127,7 +128,12 @@ class LighterExchangeClient(BaseExchangeClient):
         self._auth_token: str = ""
         self._auth_token_expiry: float = 0.0
         self._initialized = False
-        self._client_order_counter = 0
+        # Counter precisa sobreviver a restart — se zera, COIs viram ambíguos
+        # entre sessões e o lookup em /accountInactiveOrders pode retornar
+        # status de uma tx antiga com mesmo coi. Persistido em SQLite por perfil
+        # (cada perfil tem seu próprio account_index na Lighter).
+        self._client_order_counter = db.get_lighter_coi_counter(profile_id=self._profile_id)
+        self._client_order_counter_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._candle_buffer: dict[tuple[str, str], pd.DataFrame] = {}
@@ -168,8 +174,16 @@ class LighterExchangeClient(BaseExchangeClient):
         return asyncio.run_coroutine_threadsafe(coro, self._get_loop()).result(30)
 
     def _next_client_order_index(self) -> int:
-        self._client_order_counter += 1
-        return self._client_order_counter
+        # Lock + persistência: o counter precisa ser monotônico ACROSS restarts
+        # para o lookup em /accountInactiveOrders por client_order_index não
+        # ficar ambíguo. Sem isso, o status real do cancel pode vir de uma tx
+        # antiga com mesmo coi (caso real: NEAR 2026-05-26 15:40 com coi=9
+        # reusado após restart, lookup retornou reason de outra tx).
+        with self._client_order_counter_lock:
+            self._client_order_counter += 1
+            n = self._client_order_counter
+            db.set_lighter_coi_counter(n, profile_id=self._profile_id)
+        return n
 
     def _ensure_auth_token(self) -> str:
         if time.time() > self._auth_token_expiry:
