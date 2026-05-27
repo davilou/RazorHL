@@ -558,16 +558,22 @@ def set_last_candle_ts(tf: str, asset: str, ts: int) -> None:
 _COI_KEY = "lighter.client_order_counter"
 
 
-def get_lighter_coi_counter() -> int:
-    raw = get_config(_COI_KEY)
+def get_lighter_coi_counter(profile_id: int = 1) -> int:
+    """Read the Lighter client_order_index counter for a profile.
+
+    Pre-M8 the counter lived under the global key `lighter.client_order_counter`;
+    M8 moved it to `profile.<id>.lighter.client_order_counter`. The counter is
+    per Lighter account_index on the exchange, so each profile owns its own.
+    """
+    raw = get_profile_config(profile_id, "lighter.client_order_counter")
     try:
         return int(raw) if raw is not None else 0
     except (TypeError, ValueError):
         return 0
 
 
-def set_lighter_coi_counter(n: int) -> None:
-    set_config(_COI_KEY, str(int(n)))
+def set_lighter_coi_counter(n: int, profile_id: int = 1) -> None:
+    set_profile_config(profile_id, "lighter.client_order_counter", str(int(n)))
 
 
 # ── Profile CRUD ────────────────────────────────────────────────────

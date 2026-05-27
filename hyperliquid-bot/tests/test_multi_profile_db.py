@@ -190,6 +190,20 @@ def test_insert_log_with_profile_id(tmp_path, monkeypatch):
     assert {"global log", "p1 log", "p2 log"} <= all_msgs
 
 
+def test_coi_counter_is_per_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    _reset_conn()
+    db.init_db()
+    db.set_lighter_coi_counter(7, profile_id=1)
+    pid2 = db.create_profile(name="P2", exchange="lighter", credentials={})
+    db.set_lighter_coi_counter(99, profile_id=pid2)
+    assert db.get_lighter_coi_counter(profile_id=1) == 7
+    assert db.get_lighter_coi_counter(profile_id=pid2) == 99
+    # Missing → 0
+    pid3 = db.create_profile(name="P3", exchange="lighter", credentials={})
+    assert db.get_lighter_coi_counter(profile_id=pid3) == 0
+
+
 def test_strategy_config_by_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
     _reset_conn()
