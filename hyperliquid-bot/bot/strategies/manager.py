@@ -502,6 +502,7 @@ def evaluate_all(
                 asset, indicators, funding_rate, cfg, params,
                 df_1m=df_1m, df_5m=df_5m, df_15m=df_15m, df_30m=df_30m, df_1h=df_1h,
                 new_5m=new_5m, new_15m=new_15m, new_30m=new_30m, new_1h=new_1h,
+                profile_id=profile_id,
             )
         except Exception as e:
             log.error(f"[{asset}] Strategy {strategy.NAME} error: {e}", exc_info=True)

@@ -149,6 +149,9 @@ class BBReversionStrategy(BaseStrategy):
             "atr": indicators.get("atr_5m", indicators["atr"]),
             "funding_rate": funding_rate,
             "strategy_name": self.NAME,
+            # propagated from evaluate_all so blocked-signal inserts land on
+            # the right profile (default 1 falls back to legacy single-profile)
+            "profile_id": int(kwargs.get("profile_id", 1)),
         }
 
         # ── Entry triggers ────────────────────────────────────────────
