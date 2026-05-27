@@ -336,7 +336,7 @@ class LighterExchangeClient(BaseExchangeClient):
             before = len(fresh)
             fresh = _drop_open_candle(fresh, interval)
             if before and len(fresh) < before:
-                log.debug(f"[{asset}] dropped open {interval} candle ({before}→{len(fresh)})")
+                log.debug(f"[{asset}] dropped open {interval} candle ({before} -> {len(fresh)})")
 
             if is_warm:
                 merged = pd.concat([cached, fresh])
