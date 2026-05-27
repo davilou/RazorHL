@@ -115,6 +115,29 @@ _MR_LEGACY_KEYS = {
 }
 
 
+# M8 — keys that stay GLOBAL (not moved into profile.<id>.* namespace)
+_M8_GLOBAL_KEYS = {
+    "selected_exchange", "use_lighter_ws_candles", "flask.secret_key",
+    "_migration_strategy_names_5m", "_migration_dynamic_strategy_5m",
+    "_migration_multi_profile",
+    # Legacy credential keys consumed by M8 to seed the Default profile and then deleted
+    "account_address", "secret_key",
+    "lighter_account_index", "lighter_api_key_private", "lighter_api_key_index",
+}
+
+# M8 — key prefixes/exact-keys that ARE per-profile and must be namespaced
+_M8_PROFILE_PREFIXES = (
+    "strategy.",
+    "risk.",
+    "sizing.",
+)
+_M8_PROFILE_EXACT_KEYS = {
+    "bot_status",
+    "assets",
+    "lighter.client_order_counter",
+}
+
+
 def migrate_db():
     """Apply all schema and data migrations (safe to run on existing DBs)."""
     conn = get_conn()
@@ -194,6 +217,9 @@ def migrate_db():
             conn.execute(f"ALTER TABLE {table} ADD COLUMN profile_id INTEGER DEFAULT 1")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_profile ON {table}(profile_id)")
             conn.commit()
+
+    # M8b — multi-profile support: seed Default profile + namespace per-profile keys
+    _migrate_to_multi_profile(conn)
 
 
 _LEGACY_STRATEGY_NAMES_TO_5M = [
@@ -322,6 +348,94 @@ def _migrate_legacy_dynamic_instances_to_5m(conn):
     conn.execute(
         "INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
         ("_migration_dynamic_strategy_5m", "done", "done"),
+    )
+    conn.commit()
+
+
+def _is_m8_profile_key(key: str) -> bool:
+    """Return True if `key` is per-profile (must be namespaced by M8b)."""
+    if key in _M8_GLOBAL_KEYS:
+        return False
+    if key.startswith("profile."):
+        return False
+    if key.startswith("last_ts."):
+        return False
+    if key in _M8_PROFILE_EXACT_KEYS:
+        return True
+    return any(key.startswith(p) for p in _M8_PROFILE_PREFIXES)
+
+
+def _migrate_to_multi_profile(conn):
+    """M8b — seed Default profile (id=1) and namespace per-profile config keys.
+
+    Idempotent via the `_migration_multi_profile=done` marker.
+    """
+    marker = conn.execute(
+        "SELECT value FROM config WHERE key = '_migration_multi_profile'"
+    ).fetchone()
+    if marker and marker["value"] == "done":
+        return
+
+    now = int(time.time() * 1000)
+
+    # 1. Create Default profile from legacy global credentials, if not present
+    existing = conn.execute("SELECT id FROM profiles WHERE id = 1").fetchone()
+    if existing is None:
+        cred_keys = (
+            "account_address", "secret_key",
+            "lighter_account_index", "lighter_api_key_private", "lighter_api_key_index",
+        )
+        creds = {}
+        for k in cred_keys:
+            row = conn.execute("SELECT value FROM config WHERE key = ?", (k,)).fetchone()
+            creds[k] = row["value"] if row else None
+        exch_row = conn.execute(
+            "SELECT value FROM config WHERE key = 'selected_exchange'"
+        ).fetchone()
+        exchange = exch_row["value"] if exch_row else "lighter"
+        conn.execute(
+            """INSERT INTO profiles
+               (id, name, exchange, lighter_account_index, lighter_api_key_private,
+                lighter_api_key_index, hyperliquid_address, hyperliquid_secret,
+                created_at, updated_at)
+               VALUES (1, 'Default', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                exchange,
+                creds.get("lighter_account_index"),
+                creds.get("lighter_api_key_private"),
+                creds.get("lighter_api_key_index"),
+                creds.get("account_address"),
+                creds.get("secret_key"),
+                now, now,
+            ),
+        )
+
+    # 2. Backfill profile_id=1 on rows inserted before the DEFAULT was wired
+    for table in ("trades", "signals", "logs"):
+        conn.execute(f"UPDATE {table} SET profile_id = 1 WHERE profile_id IS NULL")
+
+    # 3. Namespace per-profile config keys → profile.1.<key>
+    keys_to_move = []
+    for row in conn.execute("SELECT key, value FROM config").fetchall():
+        if _is_m8_profile_key(row["key"]):
+            keys_to_move.append((row["key"], row["value"]))
+    for k, v in keys_to_move:
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (f"profile.1.{k}", v),
+        )
+        conn.execute("DELETE FROM config WHERE key = ?", (k,))
+
+    # 4. Drop legacy credential keys now that they live on the Default profile row
+    for k in ("account_address", "secret_key",
+              "lighter_account_index", "lighter_api_key_private", "lighter_api_key_index"):
+        conn.execute("DELETE FROM config WHERE key = ?", (k,))
+
+    # 5. Set marker
+    conn.execute(
+        "INSERT INTO config (key, value) VALUES ('_migration_multi_profile', 'done') "
+        "ON CONFLICT(key) DO UPDATE SET value = 'done'"
     )
     conn.commit()
 
