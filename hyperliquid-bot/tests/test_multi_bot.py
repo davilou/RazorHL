@@ -24,6 +24,9 @@ def test_union_assets_combines_running_profiles(fresh_db, monkeypatch):
     pid2 = fresh_db.create_profile(name="P2", exchange="lighter", credentials={})
     fresh_db.set_profile_config(1, "assets", json.dumps(["BTC"]))
     fresh_db.set_profile_config(pid2, "assets", json.dumps(["ETH", "SOL"]))
+    # _union_assets filters by status in (running, starting) — set both running
+    fresh_db.set_profile_config(1, "bot_status", "running")
+    fresh_db.set_profile_config(pid2, "bot_status", "running")
 
     # Pretend both bots are running (use real alive threads that just sleep)
     stop_a = threading.Event()

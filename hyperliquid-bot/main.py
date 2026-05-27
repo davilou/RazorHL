@@ -78,13 +78,14 @@ def _build_client_for_profile(profile_id: int) -> BaseExchangeClient:
 
 
 def _union_assets() -> list[str]:
-    """Sorted union of assets across every running profile.
+    """Sorted union of assets across every subscribed profile (running OR starting).
 
-    Used to drive the shared candle manager's subscription list.
+    Used to drive the shared candle manager's subscription list. Includes
+    'starting' so a freshly-spawned profile gets its assets subscribed
+    before its own bot_loop flips to "running".
     """
     seen: set[str] = set()
-    with _bot_lock:
-        pids = [pid for pid, t in _bot_threads.items() if t.is_alive()]
+    pids = _subscribed_profile_ids()
     for pid in pids:
         # 1. Profile-scoped global assets list (config UI / sizing tab)
         raw = db.get_profile_config(pid, "assets") or db.get_config("monitored_assets") or "[]"
@@ -101,17 +102,39 @@ def _union_assets() -> list[str]:
 
 
 def _running_profile_ids() -> list[int]:
-    """Profiles whose worker thread is alive AND whose stored status is 'running'."""
+    """Profiles whose worker thread is alive AND whose stored status is 'running'.
+
+    Used by `_on_candle_close_dispatch` — only fully-connected workers should
+    receive process_asset calls.
+    """
     with _bot_lock:
         candidates = [pid for pid, t in _bot_threads.items() if t.is_alive()]
     return [pid for pid in candidates
             if db.get_profile_config(pid, "bot_status") == "running"]
 
 
+def _subscribed_profile_ids() -> list[int]:
+    """Profiles whose assets/intervals the candle manager should subscribe to.
+
+    Includes both 'running' and 'starting' — a profile entering "starting"
+    state has its client already registered in `_bot_clients`, and its
+    candle subscriptions should be ready by the time `bot_loop` finishes
+    connecting and flips status to "running". If the candle manager were
+    built only against currently-running profiles, the first `start_bot`
+    of a profile would race ahead of its own status flip and the manager
+    would end up subscribed to just `{"5m"}` even when the profile has
+    15m/1h strategies enabled.
+    """
+    with _bot_lock:
+        candidates = [pid for pid, t in _bot_threads.items() if t.is_alive()]
+    return [pid for pid in candidates
+            if db.get_profile_config(pid, "bot_status") in ("running", "starting")]
+
+
 def _required_intervals_union() -> list[str]:
-    """Union of timeframes required across all running profiles. 5m is always in."""
+    """Union of timeframes required across all profiles being subscribed. 5m always in."""
     tfs: set[str] = {"5m"}
-    for pid in _running_profile_ids():
+    for pid in _subscribed_profile_ids():
         try:
             tfs.update(get_required_timeframes(profile_id=pid))
         except Exception:
@@ -164,6 +187,27 @@ def _refresh_candle_manager_assets():
                 log.exception("Error stopping stale candle manager")
             candle_mgr = None
             _candle_mgr_owner_pid = None
+
+        # If the active timeframes differ from what the manager subscribed to,
+        # tear down and rebuild — update_assets only refreshes the asset list,
+        # not the intervals. This happens when a profile enters "starting"
+        # before the candle manager was first built and the manager only saw
+        # the {"5m"} fallback, then later the profile flips to "running" with
+        # 15m/30m/1h strategies that need their own WS subscriptions.
+        if candle_mgr is not None:
+            current_intervals = set(getattr(candle_mgr, "intervals", ()) or ())
+            wanted_intervals = set(intervals)
+            if current_intervals and current_intervals != wanted_intervals:
+                log.info(
+                    "Candle manager intervals changed %s -> %s, rebuilding",
+                    sorted(current_intervals), sorted(wanted_intervals),
+                )
+                try:
+                    candle_mgr.stop()
+                except Exception:
+                    log.exception("Error stopping candle manager for interval rebuild")
+                candle_mgr = None
+                _candle_mgr_owner_pid = None
 
         if candle_mgr is None:
             # Lighter REST is auth-less for candle reads — any running profile's
