@@ -101,8 +101,14 @@ def _union_assets() -> list[str]:
     seen: set[str] = set()
     pids = _subscribed_profile_ids()
     for pid in pids:
-        # 1. Profile-scoped global assets list (config UI / sizing tab)
-        raw = db.get_profile_config(pid, "assets") or db.get_config("monitored_assets") or "[]"
+        # 1. Profile-scoped global assets list (config UI). Reads
+        # `profile.<pid>.monitored_assets` first (current config save key) with
+        # fallback to `profile.<pid>.assets` (legacy M8 namespaced key) and
+        # finally the global `monitored_assets` for pre-multi-profile installs.
+        raw = (db.get_profile_config(pid, "monitored_assets")
+               or db.get_profile_config(pid, "assets")
+               or db.get_config("monitored_assets")
+               or "[]")
         try:
             seen.update(json.loads(raw))
         except json.JSONDecodeError:
@@ -255,16 +261,11 @@ def _refresh_candle_manager_assets():
 
 
 def _build_cfg_for_profile(profile_id: int) -> dict:
-    """Per-profile cfg dict (risk + sizing + global flags) the worker uses."""
-    cfg = dict(db.get_all_config())  # base globals (debug flags, fee_rate, etc.)
-    for key in ("risk", "sizing"):
-        raw = db.get_profile_config(profile_id, key)
-        if raw:
-            try:
-                cfg[key] = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
-    return cfg
+    """Per-profile cfg dict — globals merged with this profile's overrides
+    for risk/sizing/slippage/monitored_assets/etc. Consumed by process_asset
+    → evaluate_all → executor.open_position; each one reads flat top-level
+    keys like cfg["max_positions"] / cfg["slippage"] etc."""
+    return db.get_effective_config(profile_id)
 
 
 def _on_candle_close_dispatch(asset: str, interval: str):
@@ -299,7 +300,9 @@ def _on_candle_close_dispatch(asset: str, interval: str):
         cfg = _build_cfg_for_profile(pid)
         # Profile filter: only act if this asset is in the profile's universe.
         try:
-            assets_raw = db.get_profile_config(pid, "assets") or cfg.get("monitored_assets", "[]")
+            assets_raw = (db.get_profile_config(pid, "monitored_assets")
+                          or db.get_profile_config(pid, "assets")
+                          or cfg.get("monitored_assets", "[]"))
             profile_assets = json.loads(assets_raw)
         except json.JSONDecodeError:
             profile_assets = []

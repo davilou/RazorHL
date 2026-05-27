@@ -696,16 +696,29 @@ def create_app():
 
     @app.route("/api/config", methods=["GET"])
     def api_get_config():
-        return jsonify(db.get_all_config())
+        # Returns the effective config for the active profile: globals merged
+        # with profile.<id>.<key> overrides for the per-profile keys.
+        return jsonify(db.get_effective_config(g.profile_id))
 
     @app.route("/api/config", methods=["POST"])
     def api_save_config():
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data"}), 400
-        db.set_configs(data)
+        # Split: per-profile keys go to profile.<active>.<key>, the rest to
+        # the global namespace (selected_exchange, debug_logging, credentials,
+        # fee_rate_round_trip, etc.). This is what makes changing slippage /
+        # max_positions / monitored_assets on Conta A leave Conta B untouched.
+        profile_payload = {k: v for k, v in data.items()
+                           if k in db._PER_PROFILE_CFG_KEYS}
+        global_payload = {k: v for k, v in data.items()
+                          if k not in db._PER_PROFILE_CFG_KEYS}
+        if profile_payload:
+            db.set_profile_configs(g.profile_id, profile_payload)
+        if global_payload:
+            db.set_configs(global_payload)
 
-        # Toggle debug if changed
+        # Toggle debug if changed (debug is global — applies to whole process)
         if "debug_logging" in data:
             set_debug(data["debug_logging"].lower() == "true")
 

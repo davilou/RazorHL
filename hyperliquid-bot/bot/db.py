@@ -634,6 +634,42 @@ def set_configs(kvs: dict):
 # helpers bypass DEFAULT_CONFIG, so a missing key returns None (instead of the
 # global default) — callers that need a default should handle it explicitly.
 
+# Config keys que vivem POR PERFIL (cada perfil tem seu próprio valor de risk,
+# sizing, slippage, monitored_assets, etc.). As outras keys (selected_exchange,
+# debug_logging, fee_rate_round_trip, _migration_*, flask.secret_key) ficam
+# globais. Quando o usuário salva pela página /config, as keys per-profile vão
+# pra `profile.<id>.<key>` e o resto pro namespace global.
+_PER_PROFILE_CFG_KEYS = frozenset({
+    "monitored_assets",
+    "max_positions",
+    "max_daily_loss_pct",
+    "sizing_mode",
+    "size_mode",          # legacy alias
+    "risk_pct_per_trade",
+    "fixed_trade_size_usd",
+    "slippage",
+    "tp_atr_multiplier",
+    "sl_atr_multiplier",
+    "use_testnet",
+})
+
+
+def get_effective_config(profile_id: int) -> dict:
+    """Return the global config merged with this profile's overrides.
+
+    For each key in _PER_PROFILE_CFG_KEYS, if `profile.<id>.<key>` exists in
+    the config table its value overrides the global one. This is what the
+    Config page sees and what RiskManager / executor consume so each profile
+    operates on its own risk/sizing/slippage without cross-contamination.
+    """
+    cfg = dict(get_all_config())
+    for key in _PER_PROFILE_CFG_KEYS:
+        v = get_profile_config(profile_id, key)
+        if v is not None:
+            cfg[key] = v
+    return cfg
+
+
 def get_profile_config(profile_id: int, key: str) -> str | None:
     row = get_conn().execute(
         "SELECT value FROM config WHERE key = ?",

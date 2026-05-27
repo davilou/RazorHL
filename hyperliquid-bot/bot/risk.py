@@ -22,7 +22,9 @@ class RiskManager:
         self.profile_id = profile_id
 
     def _cfg(self) -> dict:
-        return db.get_all_config()
+        # Read THIS profile's effective config — global merged with
+        # profile.<id>.<key> overrides for risk/sizing/slippage/assets.
+        return db.get_effective_config(self.profile_id)
 
     def can_open_trade(self, asset: str) -> tuple[bool, str]:
         """
