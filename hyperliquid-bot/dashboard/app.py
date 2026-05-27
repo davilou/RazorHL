@@ -8,7 +8,7 @@ import json
 import threading
 import time
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, g
+from flask import Flask, render_template, request, jsonify, redirect, url_for, g, session
 from flask_socketio import SocketIO
 
 from bot import db
@@ -19,7 +19,13 @@ log = get_logger("dashboard")
 
 def create_app():
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = "hl-bot-dashboard-secret"
+    # Persist a random session secret in the DB so Flask cookies survive restarts.
+    secret = db.get_config("flask.secret_key")
+    if not secret:
+        import secrets as _secrets
+        secret = _secrets.token_hex(32)
+        db.set_config("flask.secret_key", secret)
+    app.config["SECRET_KEY"] = secret
     socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
     # ── Pages ───────────────────────────────────────────────────────
@@ -34,13 +40,17 @@ def create_app():
 
     @app.before_request
     def _set_active_profile():
-        """Resolve the active profile for the request.
+        """Resolve the active profile for the request from the Flask session.
 
-        Phase 2 placeholder: always profile 1. Phase 3 will read
-        session['active_profile_id'] and fall back to the first profile
-        when missing/stale.
+        Falls back to the first profile in the DB when the session is missing
+        or points at a deleted profile.
         """
-        g.profile_id = 1
+        pid = session.get("active_profile_id")
+        if pid is None or db.get_profile(pid) is None:
+            profiles = db.list_profiles()
+            pid = profiles[0]["id"] if profiles else 1
+            session["active_profile_id"] = pid
+        g.profile_id = pid
 
     @app.before_request
     def check_configured():
@@ -573,6 +583,81 @@ def create_app():
         from main import stop_bot
         stop_bot(profile_id=g.profile_id)
         return jsonify({"ok": True, "status": "stopped"})
+
+    # ── Profile CRUD ───────────────────────────────────────────────
+
+    @app.route("/api/profiles", methods=["GET"])
+    def api_list_profiles():
+        out = []
+        for p in db.list_profiles():
+            d = dict(p)  # only public fields (list_profiles returns redacted columns)
+            d["bot_status"] = db.get_profile_config(p["id"], "bot_status") or "stopped"
+            d["is_active"] = (p["id"] == g.profile_id)
+            out.append(d)
+        return jsonify(out)
+
+    @app.route("/api/profiles", methods=["POST"])
+    def api_create_profile():
+        body = request.get_json(silent=True) or {}
+        try:
+            pid = db.create_profile(
+                name=(body.get("name") or "").strip(),
+                exchange=body.get("exchange") or "lighter",
+                credentials=body.get("credentials") or {},
+            )
+        except ValueError as e:
+            msg = str(e)
+            status = 409 if "already used" in msg else 400
+            return jsonify({"error": msg}), status
+        # Return only public fields
+        prof = next((p for p in db.list_profiles() if p["id"] == pid), None)
+        return jsonify(prof or {"id": pid}), 201
+
+    @app.route("/api/profiles/<int:pid>", methods=["PATCH"])
+    def api_patch_profile(pid):
+        if db.get_profile(pid) is None:
+            return jsonify({"error": "not found"}), 404
+        body = request.get_json(silent=True) or {}
+        try:
+            db.update_profile(
+                pid,
+                name=body.get("name"),
+                exchange=body.get("exchange"),
+                credentials=body.get("credentials"),
+            )
+        except ValueError as e:
+            msg = str(e)
+            status = 409 if "already used" in msg else 400
+            return jsonify({"error": msg}), status
+        prof = next((p for p in db.list_profiles() if p["id"] == pid), None)
+        return jsonify(prof or {"id": pid})
+
+    @app.route("/api/profiles/<int:pid>", methods=["DELETE"])
+    def api_delete_profile(pid):
+        if db.get_profile(pid) is None:
+            return jsonify({"error": "not found"}), 404
+        profiles = db.list_profiles()
+        if len(profiles) <= 1:
+            return jsonify({"error": "cannot delete the last profile"}), 409
+        open_rows = db.get_open_trades(profile_id=pid)
+        if open_rows:
+            return jsonify({
+                "error": "close open positions before deleting this profile",
+                "open_count": len(open_rows),
+            }), 409
+        db.delete_profile(pid)
+        # If we were sitting on this profile, fall back to the first remaining
+        if session.get("active_profile_id") == pid:
+            remaining = db.list_profiles()
+            session["active_profile_id"] = remaining[0]["id"] if remaining else 1
+        return "", 204
+
+    @app.route("/api/profiles/<int:pid>/activate", methods=["POST"])
+    def api_activate_profile(pid):
+        if db.get_profile(pid) is None:
+            return jsonify({"error": "not found"}), 404
+        session["active_profile_id"] = pid
+        return jsonify({"active_profile_id": pid})
 
     # ── SocketIO — push updates every 5 seconds ────────────────────
 
