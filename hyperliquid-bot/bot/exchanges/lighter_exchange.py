@@ -224,18 +224,45 @@ class LighterExchangeClient(BaseExchangeClient):
         log.info(f"Lighter initialized — account_index={self._account_index} api_key_index={api_key_index}")
 
     def connect(self) -> None:
-        cfg = db.get_all_config()
-        self._wallet_address = cfg.get("lighter_wallet_address", "")
-        self._public_key = cfg.get("lighter_public_key", "")
-        self._private_key = cfg.get("lighter_private_key", "")
+        """Resolve credentials for this client's profile_id and connect.
 
-        if not self._wallet_address or not self._public_key or not self._private_key:
-            raise ValueError("Missing Lighter credentials. Set lighter_wallet_address, lighter_public_key, lighter_private_key.")
+        Reads `lighter_wallet_address`, `lighter_public_key`, `lighter_private_key`
+        from the `profiles` row matching `self._profile_id`. Falls back to the
+        legacy global config keys ONLY when the profile row is empty (single-
+        profile installs that never edited credentials through the new
+        Profiles UI). This is what prevents two profiles from accidentally
+        signing orders against the same Lighter wallet.
+        """
+        profile = db.get_profile(self._profile_id) or {}
+        self._wallet_address = profile.get("lighter_wallet_address") or ""
+        self._public_key    = profile.get("lighter_public_key")    or ""
+        self._private_key   = profile.get("lighter_private_key")   or ""
+
+        if not (self._wallet_address and self._public_key and self._private_key):
+            # Fall back to legacy global config (pre-multi-profile installs).
+            # Only the Default profile (id=1) is allowed to use this path —
+            # any other profile MUST have its credentials on its row.
+            if self._profile_id != 1:
+                raise ValueError(
+                    f"Missing Lighter credentials on profile {self._profile_id}. "
+                    f"Edit the profile in the dashboard to set "
+                    f"lighter_wallet_address / lighter_public_key / lighter_private_key."
+                )
+            cfg = db.get_all_config()
+            self._wallet_address = self._wallet_address or cfg.get("lighter_wallet_address", "")
+            self._public_key    = self._public_key    or cfg.get("lighter_public_key", "")
+            self._private_key   = self._private_key   or cfg.get("lighter_private_key", "")
+
+        if not (self._wallet_address and self._public_key and self._private_key):
+            raise ValueError(
+                f"Missing Lighter credentials for profile {self._profile_id}. "
+                "Set lighter_wallet_address, lighter_public_key, lighter_private_key."
+            )
 
         self._client = LighterClient(user_label=self._wallet_address[:10])
         self._initialized = False
         self._ensure_init()
-        log.info(f"Connected to Lighter — wallet {self._wallet_address[:10]}...")
+        log.info(f"Connected to Lighter (profile {self._profile_id}) — wallet {self._wallet_address[:10]}...")
 
     def disconnect(self) -> None:
         self._initialized = False

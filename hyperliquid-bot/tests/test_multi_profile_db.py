@@ -192,6 +192,76 @@ def test_insert_log_with_profile_id(tmp_path, monkeypatch):
     assert {"global log", "p1 log", "p2 log"} <= all_msgs
 
 
+def test_lighter_client_connects_with_profile_credentials(tmp_path, monkeypatch):
+    """Each LighterExchangeClient must read its credentials from its own profile
+    row, not from the shared global config — otherwise two profiles end up
+    signing orders against the same exchange wallet.
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    _reset_conn()
+    db.init_db()
+    # Legacy global creds = Default's wallet
+    db.set_config("lighter_wallet_address", "0xDEFAULT")
+    db.set_config("lighter_public_key",    "DEFAULT_PUB")
+    db.set_config("lighter_private_key",   "DEFAULT_PRIV")
+    # Default profile populates from globals on M8c — re-run since we just wrote them
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE profiles SET lighter_wallet_address = ?, lighter_public_key = ?, lighter_private_key = ? WHERE id = 1",
+        ("0xDEFAULT", "DEFAULT_PUB", "DEFAULT_PRIV"),
+    )
+    conn.commit()
+    pid2 = db.create_profile(name="P2", exchange="lighter", credentials={
+        "lighter_wallet_address": "0xHEDGE",
+        "lighter_public_key":     "HEDGE_PUB",
+        "lighter_private_key":    "HEDGE_PRIV",
+    })
+
+    from bot.exchanges.lighter_exchange import LighterExchangeClient
+
+    # Stub out the network bits so connect() doesn't actually hit Lighter
+    monkeypatch.setattr(LighterExchangeClient, "_ensure_init", lambda self: None)
+
+    class _StubClient:
+        def __init__(self, user_label=None):
+            pass
+    import bot.exchanges.lighter_exchange as le_mod
+    monkeypatch.setattr(le_mod, "LighterClient", _StubClient)
+
+    c1 = LighterExchangeClient(profile_id=1)
+    c1.connect()
+    assert c1._wallet_address == "0xDEFAULT"
+    assert c1._private_key == "DEFAULT_PRIV"
+
+    c2 = LighterExchangeClient(profile_id=pid2)
+    c2.connect()
+    assert c2._wallet_address == "0xHEDGE", \
+        f"profile {pid2} client must read its OWN credentials, got {c2._wallet_address!r}"
+    assert c2._private_key == "HEDGE_PRIV"
+
+
+def test_lighter_client_rejects_non_default_profile_with_empty_credentials(tmp_path, monkeypatch):
+    """A non-Default profile without credentials on its row must NOT fall back
+    to the global config — that would silently sign against the wrong wallet.
+    """
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    _reset_conn()
+    db.init_db()
+    db.set_config("lighter_wallet_address", "0xGLOBAL")
+    db.set_config("lighter_public_key",    "G_PUB")
+    db.set_config("lighter_private_key",   "G_PRIV")
+    pid2 = db.create_profile(name="P2", exchange="lighter", credentials={})
+
+    from bot.exchanges.lighter_exchange import LighterExchangeClient
+    import bot.exchanges.lighter_exchange as le_mod
+    monkeypatch.setattr(LighterExchangeClient, "_ensure_init", lambda self: None)
+    monkeypatch.setattr(le_mod, "LighterClient", lambda **kw: object())
+
+    c = LighterExchangeClient(profile_id=pid2)
+    with pytest.raises(ValueError, match=f"Missing Lighter credentials on profile {pid2}"):
+        c.connect()
+
+
 def test_coi_counter_is_per_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
     _reset_conn()
