@@ -107,3 +107,23 @@ def test_m8_is_idempotent(tmp_path, monkeypatch):
     db.migrate_db()  # second call must be a no-op
     rows = db.get_conn().execute("SELECT COUNT(*) AS n FROM profiles").fetchone()
     assert rows["n"] >= 1
+
+
+def test_legacy_strategy_params_reachable_via_profile_1(tmp_path, monkeypatch):
+    """Legacy `strategy.<name>.params` value survives M8 reachable under the new namespace."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    _reset_conn()
+    db.init_db()
+    conn = db.get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        ("strategy.bb_stoch_btc_5m.params", json.dumps({"bb_period": 20, "stoch_os": 25})),
+    )
+    conn.commit()
+    # Force re-run of M8b
+    conn.execute("DELETE FROM config WHERE key = '_migration_multi_profile'")
+    conn.commit()
+    db.migrate_db()
+
+    params = json.loads(db.get_config("profile.1.strategy.bb_stoch_btc_5m.params"))
+    assert params == {"bb_period": 20, "stoch_os": 25}
