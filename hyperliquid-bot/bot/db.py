@@ -233,6 +233,12 @@ def migrate_db():
     # directly). Idempotent on a clean DB; no-op when nothing matches.
     _sweep_stray_profile_keys(conn)
 
+    # M9 — add indicators_json column to signals (for fidelity checker)
+    sig_cols = [r[1] for r in conn.execute("PRAGMA table_info(signals)").fetchall()]
+    if "indicators_json" not in sig_cols:
+        conn.execute("ALTER TABLE signals ADD COLUMN indicators_json TEXT")
+        conn.commit()
+
 
 _LEGACY_STRATEGY_NAMES_TO_5M = [
     "bb_reversion_btc", "bb_reversion_eth", "bb_reversion_sol",
