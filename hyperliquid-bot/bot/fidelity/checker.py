@@ -378,6 +378,13 @@ def _load_live_signals(strategy: str, asset: str, profile_id: int,
     by dispatch latency (typically 0-90s on a 5m TF, more on higher TFs).
     Without snapping, every live signal would appear as a phantom one candle
     after its backtest twin would-be missed.
+
+    **Blocked signals (executed=0 AND reason mentions a filter veto) are
+    skipped.** The bot persists those as audit trail when a trigger fires
+    but a downstream filter (EMA, RSI guard, risk cap) vetoes the trade.
+    The backtest engine applies the same filters by zeroing the trigger
+    mask — it never emits a "signal" for a vetoed candle. To compare
+    maçã-com-maçã, we drop these on the live side.
     """
     from datetime import datetime
     from bot import db as bot_db
@@ -395,6 +402,11 @@ def _load_live_signals(strategy: str, asset: str, profile_id: int,
 
     out: list[dict] = []
     for r in rows:
+        # Skip blocked signals — they represent triggers vetoed by a filter,
+        # which the engine doesn't even emit (filters are applied at the
+        # mask level there). Including them produces false-positive phantoms.
+        if r["executed"] == 0 and r["reason"]:
+            continue
         try:
             raw_ts_ms = int(datetime.fromisoformat(r["timestamp"]).timestamp() * 1000)
         except Exception:
