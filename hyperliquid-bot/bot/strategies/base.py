@@ -33,6 +33,29 @@ class BaseStrategy(ABC):
     DEFAULT_PARAMS: dict = {}
     REQUIRED_TIMEFRAMES: list[str] = ["5m"]
 
+    @staticmethod
+    def _make_indicators_snapshot(values: dict) -> str:
+        """Serialize an indicator snapshot to JSON for the fidelity checker.
+
+        Filters None/NaN/inf values; rounds floats to 6 decimals to keep the
+        payload small and reproducible across re-runs of the backtest engine.
+        """
+        import json
+        import math
+        clean: dict = {}
+        for k, v in values.items():
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                clean[k] = v
+                continue
+            if math.isnan(fv) or math.isinf(fv):
+                continue
+            clean[k] = round(fv, 6)
+        return json.dumps(clean)
+
     def _insert_fee_block_signal(self, base, asset, indicators, tp_mult, fee_rate, side):
         atr_pct = indicators["atr"] / indicators["close_1m"]
         reason = (

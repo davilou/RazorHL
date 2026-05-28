@@ -177,6 +177,15 @@ class BBStochStrategy(BaseStrategy):
         band_range_curr = bbu_curr - bbl_curr + 1e-9
         bbp_curr = (close_curr - bbl_curr) / band_range_curr
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "bbu": bbu_curr, "bbl": bbl_curr, "bbm": bbm_curr,
+            "bbp": bbp_curr,
+            "stoch_k": stk_curr, "stoch_d": std_curr,
+            "ema": ema_val,
+        })
+
         # ── Entry triggers (replicar lógica do scan) ──────────────────
         long_bb  = bbp_curr < bbp_long_threshold
         short_bb = bbp_curr > bbp_short_threshold
@@ -215,6 +224,7 @@ class BBStochStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         # ── SHORT ─────────────────────────────────────────────────────
@@ -237,6 +247,7 @@ class BBStochStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         return None
