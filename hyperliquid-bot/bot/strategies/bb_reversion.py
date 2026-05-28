@@ -102,10 +102,9 @@ class BBReversionStrategy(BaseStrategy):
 
         # ── Indicators ────────────────────────────────────────────────
         bb  = ta.bbands(df["close"], length=bb_period, std=bb_std)
-        ema = ta.ema(df["close"], length=ema_period)
         rsi = ta.rsi(df["close"], length=14)
 
-        if bb is None or ema is None or rsi is None:
+        if bb is None or rsi is None:
             return None
 
         bbu_col = [c for c in bb.columns if c.startswith("BBU_")]
@@ -117,7 +116,7 @@ class BBReversionStrategy(BaseStrategy):
             log.warning(f"[{asset}] BB columns not found: {list(bb.columns)}")
             return None
 
-        if len(bb) < 2 or len(ema) < 1 or len(rsi) < 1:
+        if len(bb) < 2 or len(rsi) < 1:
             return None
 
         bbu = bb[bbu_col[0]]
@@ -132,10 +131,17 @@ class BBReversionStrategy(BaseStrategy):
         bbm_curr = float(bbm.iloc[-1])
         bbp_prev = float(bbp.iloc[-2])
 
-        ema_val = float(ema.iloc[-1])
         rsi_val = float(rsi.iloc[-1])
 
-        if any(pd.isna(v) for v in [bbu_curr, bbl_curr, bbm_curr, bbp_prev, ema_val, rsi_val]):
+        # ── Optional EMA trend filter (ema_period > 0) ────────────────
+        ema_val = None
+        if ema_period > 0:
+            ema = ta.ema(df["close"], length=ema_period)
+            if ema is None or len(ema) < 1 or pd.isna(ema.iloc[-1]):
+                return None
+            ema_val = float(ema.iloc[-1])
+
+        if any(pd.isna(v) for v in [bbu_curr, bbl_curr, bbm_curr, bbp_prev, rsi_val]):
             return None
 
         now = datetime.now(timezone.utc).isoformat()
@@ -167,17 +173,18 @@ class BBReversionStrategy(BaseStrategy):
         short_trigger = bbp_prev > bbp_short_threshold and close_curr < bbu_curr and close_curr > bbm_curr
 
         # ── Diagnostic scan log (permanente) ──────────────────────────
+        ema_txt = f"EMA{ema_period}={ema_val:.2f}" if ema_val is not None else "EMA=off"
         log.signals(
             f"[{asset}] BB_REV SCAN [{self.NAME}] — "
             f"close={close_curr:.2f} BBP_prev={bbp_prev:.3f} "
             f"(long<{bbp_long_threshold} short>{bbp_short_threshold}) "
-            f"RSI={rsi_val:.1f} EMA{ema_period}={ema_val:.2f} "
+            f"RSI={rsi_val:.1f} {ema_txt} "
             f"trig=long:{long_trigger} short:{short_trigger}"
         )
 
         # ── LONG ──────────────────────────────────────────────────────
         if long_trigger:
-            if close_curr < ema_val:
+            if ema_val is not None and close_curr < ema_val:
                 reason = f"BB_REV LONG blocked: close {close_curr:.2f} < EMA{ema_period} {ema_val:.2f}"
                 log.debug(f"[{asset}] {reason}")
                 db.insert_signal({**base, "side": "long", "reason": reason})
@@ -190,7 +197,7 @@ class BBReversionStrategy(BaseStrategy):
             log.signals(
                 f"[{asset}] BB_REVERSION LONG — "
                 f"BBP_prev={bbp_prev:.3f} RSI={rsi_val:.1f} "
-                f"EMA{ema_period}={ema_val:.2f} close={close_curr:.2f}"
+                f"{ema_txt} close={close_curr:.2f}"
             )
             return apply_live_filters(p, df, {
                 **base,
@@ -205,7 +212,7 @@ class BBReversionStrategy(BaseStrategy):
 
         # ── SHORT ─────────────────────────────────────────────────────
         if short_trigger:
-            if close_curr > ema_val:
+            if ema_val is not None and close_curr > ema_val:
                 reason = f"BB_REV SHORT blocked: close {close_curr:.2f} > EMA{ema_period} {ema_val:.2f}"
                 log.debug(f"[{asset}] {reason}")
                 db.insert_signal({**base, "side": "short", "reason": reason})
@@ -218,7 +225,7 @@ class BBReversionStrategy(BaseStrategy):
             log.signals(
                 f"[{asset}] BB_REVERSION SHORT — "
                 f"BBP_prev={bbp_prev:.3f} RSI={rsi_val:.1f} "
-                f"EMA{ema_period}={ema_val:.2f} close={close_curr:.2f}"
+                f"{ema_txt} close={close_curr:.2f}"
             )
             return apply_live_filters(p, df, {
                 **base,

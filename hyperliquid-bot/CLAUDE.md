@@ -237,7 +237,7 @@ Arquitetura plugável via `BaseStrategy` ABC. O `manager.py` avalia todas as est
 - Gatilho: `new_5m=True`; mean reversion via retorno do preço para dentro das Bollinger Bands
 - Entry LONG: BBP_prev < bbp_long_threshold AND close_curr > BBL_curr AND close_curr < BBM_curr
 - Entry SHORT: BBP_prev > bbp_short_threshold AND close_curr < BBU_curr AND close_curr > BBM_curr
-- Filtros: EMA trend (close > EMA → só LONG; close < EMA → só SHORT) + RSI(14) guard (LONG: RSI < rsi_long_max; SHORT: RSI > rsi_short_min)
+- Filtros: EMA trend (close > EMA → só LONG; close < EMA → só SHORT) + RSI(14) guard (LONG: RSI < rsi_long_max; SHORT: RSI > rsi_short_min). **EMA trend é opcional via `ema_period > 0`** — quando `ema_period=0` o filtro é totalmente pulado (não computa nem aplica). Antes a estratégia chamava `ta.ema(close, length=0)` sempre e usava o retorno como filtro, bloqueando TODOS os sinais com "EMA0" mesmo com o filtro supostamente desligado — bug detectado em CRCL onde a estratégia rodou 24h emitindo só sinais blocked ("BB_REV SHORT blocked: close 105.89 > EMA0 104.08")
 - `_resolve_params(params)` = `{**self.DEFAULT_PARAMS, **params}` — sem presets; params do DB sobrescrevem os extra_defaults da instância
 - Presets (aggressive/balanced/conservative) removidos — não existem mais
 - Signal contém: `tp_pct`, `sl_pct`, `bb_mid` (valor da midline no entry), `bb_mid_exit`
