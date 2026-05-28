@@ -62,14 +62,28 @@ _dispatch_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dispatch"
 # doesn't keep re-detecting them. Prevents a restart-induced "catch-up"
 # where the bot fires signals from candles that closed minutes ago, with
 # a stale price baseline that the strategy backtest never saw.
-_TF_STALENESS_SEC = 120
+#
+# Threshold é PROPORCIONAL ao TF (~50% do candle, com piso de 120s):
+# 5m → 150s; 15m → 7.5min; 1h → 30min; 4h → 2h; 1d → 12h.
+# Originalmente era hardcoded em 120s o que bloqueava TODO boundary 1h+,
+# porque o dispatch é a cada 5m close — o primeiro check de 1h sempre cai
+# em ~5min após o close, >120s. Estratégias 1h/4h/1d nunca eram avaliadas.
+_TF_STALENESS_SEC_MIN = 120
 _TF_INTERVAL_MS: dict[str, int] = {
+    "5m":  5 * 60 * 1000,
     "15m": 15 * 60 * 1000,
     "30m": 30 * 60 * 1000,
     "1h":  60 * 60 * 1000,
     "4h":  4 * 60 * 60 * 1000,
     "1d":  24 * 60 * 60 * 1000,
 }
+
+
+def _staleness_threshold_sec(tf_key: str) -> int:
+    """Half of the timeframe in seconds, but never below the global minimum."""
+    interval_ms = _TF_INTERVAL_MS.get(tf_key, 0)
+    proportional = (interval_ms // 1000) // 2
+    return max(_TF_STALENESS_SEC_MIN, proportional)
 
 _asset_live_status: dict[str, dict] = {}
 _status_lock = threading.Lock()
@@ -596,10 +610,11 @@ def process_asset(asset: str, cfg: dict,
         interval_ms = _TF_INTERVAL_MS.get(tf_key, 0)
         close_ts = latest_ts + interval_ms
         age_sec = (now_ms - close_ts) / 1000.0
-        if age_sec > _TF_STALENESS_SEC:
+        threshold_sec = _staleness_threshold_sec(tf_key)
+        if age_sec > threshold_sec:
             log.warning(
                 f"[{asset}] {tf_label} candle close was {age_sec:.0f}s ago "
-                f"(> {_TF_STALENESS_SEC}s threshold) — skipping evaluation to avoid stale signal"
+                f"(> {threshold_sec}s threshold) — skipping evaluation to avoid stale signal"
             )
             return False
         log.info(f"[{asset}] New {tf_label} candle closed")
