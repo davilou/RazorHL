@@ -22,10 +22,45 @@ function updateStatusIndicator(status) {
 }
 
 // ── SocketIO — overview push updates ───────────────────────────────
-socket.on('overview_update', function(data) {
+//
+// Backend emits one `overview_update.<profile_id>` per running profile every
+// 5s (plus a legacy `overview_update` for profile 1 only). The active-profile
+// payload drives the sidebar status indicator + page-specific listeners.
+// Status dots inside the profile dropdown listen to ALL profiles so users see
+// their state live without switching context.
+
+function _handleOverviewUpdate(data) {
+  const pid = data && data.profile_id;
+  // Always keep the dropdown dots fresh for whichever profile this event is for
+  if (pid != null) {
+    const li = document.querySelector('#profileList li[data-id="' + pid + '"]');
+    if (li) {
+      const dot = li.querySelector('.profile-status-dot');
+      if (dot) dot.className = 'profile-status-dot ' + (data.bot_status || 'stopped');
+    }
+    if (pid === _activeProfileId) {
+      const headDot = document.getElementById('profileStatusDot');
+      if (headDot) headDot.className = 'profile-status-dot ' + (data.bot_status || 'stopped');
+    }
+  }
+  // Only the active profile's payload drives the main UI
+  if (pid != null && pid !== _activeProfileId) return;
   updateStatusIndicator(data.bot_status);
-  // Page-specific handlers can listen via custom events
   document.dispatchEvent(new CustomEvent('hlUpdate', { detail: data }));
+}
+
+// Catch every `overview_update.<pid>` event (Socket.IO v3+ supports onAny)
+if (typeof socket.onAny === 'function') {
+  socket.onAny(function(event, data) {
+    if (typeof event === 'string' && event.indexOf('overview_update.') === 0) {
+      _handleOverviewUpdate(data);
+    }
+  });
+}
+
+// Legacy fallback: profile 1 still emits `overview_update` for backwards-compat
+socket.on('overview_update', function(data) {
+  _handleOverviewUpdate(data);
 });
 
 socket.on('connect', function() {
@@ -89,3 +124,252 @@ async function apiGet(url) {
     return null;
   }
 }
+
+// ── Profile selector ────────────────────────────────────────────────
+let _profilesCache = [];
+let _activeProfileId = null;
+
+async function loadProfiles() {
+  const list = await apiGet('/api/profiles');
+  if (!Array.isArray(list)) return;
+  _profilesCache = list;
+  const active = list.find(p => p.is_active) || list[0];
+  _activeProfileId = active ? active.id : null;
+  renderProfileMenu();
+}
+
+function renderProfileMenu() {
+  const ul = document.getElementById('profileList');
+  if (!ul) return;
+  ul.innerHTML = '';
+  for (const p of _profilesCache) {
+    const li = document.createElement('li');
+    li.dataset.id = p.id;
+    if (p.id === _activeProfileId) li.classList.add('active');
+    const dot = document.createElement('span');
+    dot.className = 'profile-status-dot ' + (p.bot_status || 'stopped');
+    const name = document.createElement('span');
+    name.textContent = p.name;
+    li.appendChild(dot);
+    li.appendChild(name);
+    li.addEventListener('click', () => activateProfile(p.id));
+    ul.appendChild(li);
+  }
+  const active = _profilesCache.find(p => p.id === _activeProfileId);
+  if (active) {
+    const nameEl = document.getElementById('profileCurrentName');
+    const dotEl = document.getElementById('profileStatusDot');
+    if (nameEl) nameEl.textContent = active.name;
+    if (dotEl) dotEl.className = 'profile-status-dot ' + (active.bot_status || 'stopped');
+  }
+}
+
+async function activateProfile(pid) {
+  if (pid === _activeProfileId) {
+    closeProfileMenu();
+    return;
+  }
+  const res = await fetch('/api/profiles/' + pid + '/activate', { method: 'POST' });
+  if (res.ok) window.location.reload();
+}
+
+function openProfileMenu() {
+  const m = document.getElementById('profileMenu');
+  const btn = document.getElementById('profileCurrentBtn');
+  if (!m) return;
+  m.hidden = false;
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+}
+function closeProfileMenu() {
+  const m = document.getElementById('profileMenu');
+  const btn = document.getElementById('profileCurrentBtn');
+  if (!m) return;
+  m.hidden = true;
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+function toggleProfileMenu() {
+  const m = document.getElementById('profileMenu');
+  if (!m) return;
+  if (m.hidden) openProfileMenu(); else closeProfileMenu();
+}
+
+function openProfileModal(opts) {
+  const back = document.getElementById('profileModalBackdrop');
+  const title = document.getElementById('profileModalTitle');
+  const form = document.getElementById('profileForm');
+  if (!back || !form) return;
+  form.reset();
+  // Reset any "armed for clear" markers from a previous opening of the modal
+  form.querySelectorAll('.cred-clear.armed').forEach(b => b.classList.remove('armed'));
+  form.querySelectorAll('input.armed-clear').forEach(i => {
+    i.classList.remove('armed-clear');
+    i.disabled = false;
+  });
+  form.dataset.mode = opts.mode;
+  form.dataset.id = opts.id != null ? String(opts.id) : '';
+  const titles = { create: 'Novo perfil', rename: 'Renomear perfil', creds: 'Editar credenciais' };
+  title.textContent = titles[opts.mode] || 'Perfil';
+  form.querySelectorAll('fieldset.creds').forEach(fs => {
+    fs.style.display = (opts.mode === 'rename') ? 'none' : '';
+  });
+  if (opts.mode !== 'create') {
+    const p = _profilesCache.find(x => x.id === opts.id);
+    if (p) {
+      form.name.value = p.name || '';
+      if (form.exchange) form.exchange.value = p.exchange || 'lighter';
+      if (form.lighter_wallet_address) form.lighter_wallet_address.value = p.lighter_wallet_address || '';
+      if (form.hyperliquid_address) form.hyperliquid_address.value = p.hyperliquid_address || '';
+    }
+  }
+  back.hidden = false;
+}
+function closeProfileModal() {
+  const back = document.getElementById('profileModalBackdrop');
+  if (back) back.hidden = true;
+}
+
+async function deleteActiveProfile() {
+  const active = _profilesCache.find(p => p.id === _activeProfileId);
+  const label = active ? active.name : 'este perfil';
+  if (!confirm('Excluir "' + label + '"? Trades, signals e configs do perfil serao removidos.')) return;
+  const res = await fetch('/api/profiles/' + _activeProfileId, { method: 'DELETE' });
+  if (res.status === 204) { window.location.reload(); return; }
+  let msg = 'HTTP ' + res.status;
+  try { const b = await res.json(); if (b && b.error) msg = b.error; } catch (e) {}
+  alert('Nao foi possivel excluir: ' + msg);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('profileCurrentBtn');
+  const sel = document.getElementById('profileSelector');
+  const back = document.getElementById('profileModalBackdrop');
+  const form = document.getElementById('profileForm');
+  if (!btn || !sel) return;
+
+  btn.addEventListener('click', (e) => { e.stopPropagation(); toggleProfileMenu(); });
+
+  sel.addEventListener('click', (e) => {
+    const action = e.target && e.target.dataset && e.target.dataset.action;
+    if (!action) return;
+    e.stopPropagation();
+    closeProfileMenu();
+    if (action === 'new') openProfileModal({ mode: 'create' });
+    else if (action === 'rename') openProfileModal({ mode: 'rename', id: _activeProfileId });
+    else if (action === 'edit-creds') openProfileModal({ mode: 'creds', id: _activeProfileId });
+    else if (action === 'delete') deleteActiveProfile();
+  });
+
+  document.addEventListener('click', (e) => {
+    if (sel.contains(e.target)) return;
+    closeProfileMenu();
+  });
+
+  if (back) {
+    back.addEventListener('click', (e) => {
+      // Close when clicking the dim backdrop OR any element marked with
+      // `data-close` (Cancelar button, top-right × icon, etc).
+      const t = e.target;
+      if (t === back) { closeProfileModal(); return; }
+      if (t.closest && t.closest('[data-close]')) { closeProfileModal(); return; }
+    });
+    // ESC anywhere on the page dismisses an open modal — covers "I clicked
+    // somewhere weird and the modal won't go" scenarios.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !back.hidden) closeProfileModal();
+    });
+  }
+
+  if (form) {
+    const exch = form.querySelector('select[name="exchange"]');
+    const updateExchangeFields = () => {
+      const mode = form.dataset.mode;
+      if (mode === 'rename') return;
+      const v = exch.value;
+      const lt = form.querySelector('.creds-lighter');
+      const hl = form.querySelector('.creds-hl');
+      if (lt) lt.hidden = v !== 'lighter';
+      if (hl) hl.hidden = v !== 'hyperliquid';
+    };
+    if (exch) exch.addEventListener('change', updateExchangeFields);
+
+    // Per-credential "clear" toggle: arms a flag that submit reads to send
+    // explicit null (which makes the backend overwrite the column with NULL).
+    // Click again to disarm.
+    form.querySelectorAll('.cred-clear').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        const fieldName = btn.dataset.clear;
+        const input = form.querySelector(`input[name="${fieldName}"]`);
+        if (!input) return;
+        const armed = btn.classList.toggle('armed');
+        if (armed) {
+          input.classList.add('armed-clear');
+          input.value = '';
+          input.disabled = true;
+        } else {
+          input.classList.remove('armed-clear');
+          input.disabled = false;
+        }
+      });
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      // Mode/id can be lost if the modal was rendered without openProfileModal
+      // running first (race during initial load, browser back, etc). Default
+      // to "create" when mode is unset; treat any non-numeric id as missing.
+      const mode = form.dataset.mode || 'create';
+      const idRaw = form.dataset.id;
+      const id = (idRaw && /^\d+$/.test(idRaw)) ? idRaw : null;
+      if (mode !== 'create' && id == null) {
+        alert('Nao foi possivel identificar o perfil a editar. Recarregue a pagina e tente novamente.');
+        return;
+      }
+      const credKeys = ['lighter_wallet_address','lighter_public_key','lighter_private_key',
+                         'hyperliquid_address','hyperliquid_secret'];
+      const creds = {};
+      credKeys.forEach(k => {
+        const armed = form.querySelector(`.cred-clear[data-clear="${k}"].armed`);
+        if (armed) {
+          creds[k] = null;  // explicit clear — backend overwrites with NULL
+          return;
+        }
+        const v = (fd.get(k) || '').toString().trim();
+        if (v) creds[k] = v;
+        // else: omit → backend preserves existing value
+      });
+      let res;
+      if (mode === 'create') {
+        res = await fetch('/api/profiles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: (fd.get('name') || '').toString().trim(),
+            exchange: fd.get('exchange') || 'lighter',
+            credentials: creds,
+          }),
+        });
+      } else {
+        const body = (mode === 'rename')
+          ? { name: (fd.get('name') || '').toString().trim() }
+          : { exchange: fd.get('exchange') || 'lighter', credentials: creds };
+        res = await fetch('/api/profiles/' + id, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      }
+      if (!res.ok) {
+        let msg = 'HTTP ' + res.status;
+        try { const b = await res.json(); if (b && b.error) msg = b.error; } catch (e) {}
+        alert(msg);
+        return;
+      }
+      closeProfileModal();
+      window.location.reload();
+    });
+  }
+
+  loadProfiles();
+});

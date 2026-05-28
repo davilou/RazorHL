@@ -24,6 +24,7 @@ import pandas_ta as ta
 
 from bot.logger import get_logger
 from bot.strategies.base import BaseStrategy, select_tf_df
+from bot.strategies.live_filters import apply_live_filters
 
 log = get_logger("strategies.bb_rsi")
 
@@ -44,6 +45,15 @@ class BBRSIStrategy(BaseStrategy):
         "sl_pct":              0.8,
         "bb_mid_exit":         False,
         "ema_period":          0,
+        # ── Live filters (scanner v2) — defaults = off ──
+        "adx_period":          0,
+        "adx_min":             0,
+        "session_start":       0,
+        "session_end":         24,
+        "atr_tp_mode":         False,
+        "atr_tp_mult":         1.0,
+        "atr_sl_mult":         1.0,
+        "atr_period":          14,
         "assets":              [],
         "asset_overrides":     {},
     }
@@ -62,7 +72,7 @@ class BBRSIStrategy(BaseStrategy):
     def evaluate(self, asset, indicators, funding_rate, cfg, params,
                  df_1m=None, df_5m=None, df_15m=None, df_30m=None, df_1h=None, **kwargs):
         p = self._resolve_params(asset, params)
-        tf, df = select_tf_df(p, kwargs,
+        tf, df = select_tf_df(p, kwargs, name=self.NAME, asset=asset,
                               df_5m=df_5m, df_15m=df_15m, df_30m=df_30m, df_1h=df_1h)
         if df is None:
             return None
@@ -132,6 +142,13 @@ class BBRSIStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "bbp": bbp_curr, "bbu": bbu_curr, "bbl": bbl_curr,
+            "bbm": bbm_curr, "rsi": rsi_curr, "ema": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = bbp_curr < bbp_long_threshold and rsi_curr < rsi_os
         short_trig = bbp_curr > bbp_short_threshold and rsi_curr > rsi_ob
@@ -153,7 +170,7 @@ class BBRSIStrategy(BaseStrategy):
                 f"close={close_curr:.4f} BBP={bbp_curr:.3f} RSI={rsi_curr:.1f} "
                 f"tp={tp_pct:.3%} sl={sl_pct:.3%}"
             )
-            return {
+            return apply_live_filters(p, df, {
                 **base,
                 "side": "long",
                 "signal_price": close_curr,
@@ -161,7 +178,8 @@ class BBRSIStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
-            }
+                "indicators_json": indicators_json,
+            }, is_trend_strategy=False)
 
         # ── SHORT ────────────────────────────────────────────────────
         if bbp_curr > bbp_short_threshold and rsi_curr > rsi_ob:
@@ -172,7 +190,7 @@ class BBRSIStrategy(BaseStrategy):
                 f"close={close_curr:.4f} BBP={bbp_curr:.3f} RSI={rsi_curr:.1f} "
                 f"tp={tp_pct:.3%} sl={sl_pct:.3%}"
             )
-            return {
+            return apply_live_filters(p, df, {
                 **base,
                 "side": "short",
                 "signal_price": close_curr,
@@ -180,6 +198,7 @@ class BBRSIStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
-            }
+                "indicators_json": indicators_json,
+            }, is_trend_strategy=False)
 
         return None

@@ -29,11 +29,17 @@ _CANDLES_DIR = Path(__file__).parents[3] / "candles"
 _SCAN_WARMUP_DAYS = 2
 
 # ── Approval criteria ──────────────────────────────────────────────────────
+# wr_min/tpd_min/tpd_max foram desabilitados (valores permissivos) porque:
+#  - wr_min: assumia TP/SL simétricos; combos com TP>SL e WR baixo+PF alto eram
+#    rejeitados injustamente. PF (>=1.1) já captura "ganha mais do que perde".
+#  - tpd_min/tpd_max: calibrados pra 5m, rejeitavam combos legítimos no 15m/1h.
+# Filtros equivalentes continuam disponíveis no painel de UI (Min Win Rate,
+# Min TPD, Max TPD) — só não bloqueiam mais por default.
 APPROVAL = {
     "pf_min":     1.1,
-    "wr_min":     0.50,
-    "tpd_min":    1.0,
-    "tpd_max":    15.0,
+    "wr_min":     0.0,
+    "tpd_min":    0.0,
+    "tpd_max":    999.0,
     "max_dd_max": 30.0,
     "min_trades": 5,
 }
@@ -766,6 +772,19 @@ def run_scan(asset: str, days: int = 90,
 
 
 def _translate_params(strategy: str, params: dict) -> dict:
+    # Live filter fields shared by ALL strategies (scanner v2).
+    # Estes 7 campos chegam dos resultados do scanner_v2 com defaults seguros
+    # (= filtro off) quando vêm do scanner antigo. A engine live agora consome
+    # estes params via bot/strategies/live_filters.py.
+    _live_filters = {
+        "adx_period":    int(params.get("adx_period", 0)),
+        "adx_min":       float(params.get("adx_min", 0)),
+        "session_start": int(params.get("session_start", 0)),
+        "session_end":   int(params.get("session_end", 24)),
+        "atr_tp_mode":   bool(params.get("atr_tp_mode", False)),
+        "atr_tp_mult":   float(params.get("atr_tp_mult", 1.0)),
+        "atr_sl_mult":   float(params.get("atr_sl_mult", 1.0)),
+    }
     if strategy == "BB_Stoch":
         th = float(params.get("bbp_th", 0.10))
         return {
@@ -780,6 +799,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "tp_pct":              params.get("tp"),
             "sl_pct":              params.get("sl"),
             "bb_mid_exit":         bool(params.get("bb_mid_exit", False)),
+            **_live_filters,
         }
     if strategy == "Stoch_Scalp":
         return {
@@ -788,6 +808,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "ema_period": params.get("trend_ema", 0),
             "tp_pct":     params.get("tp"),
             "sl_pct":     params.get("sl"),
+            **_live_filters,
         }
     if strategy == "EMA_Cross":
         return {
@@ -797,6 +818,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "tp_pct":     params.get("tp"),
             "sl_pct":     params.get("sl"),
             "use_atr_sl": False,  # scanner usa sl_pct fixo, força fixed-mode mesmo em instância com ATR
+            **_live_filters,
         }
     if strategy == "BB_Reversion":
         th = float(params.get("bbp_th", 0.10))
@@ -811,6 +833,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "rsi_long_max":        100,    # scanner não modela RSI guard — desabilita
             "rsi_short_min":       0,
             "bb_mid_exit":         bool(params.get("bb_mid_exit", False)),
+            **_live_filters,
         }
     if strategy == "RSI_Scalp":
         return {
@@ -819,6 +842,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "ema_period": params.get("trend_ema", 0),
             "tp_pct":     params.get("tp"),
             "sl_pct":     params.get("sl"),
+            **_live_filters,
         }
     if strategy == "BB_RSI":
         th = float(params.get("bbp_th", 0.10))
@@ -833,6 +857,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "tp_pct":              params.get("tp"),
             "sl_pct":              params.get("sl"),
             "bb_mid_exit":         bool(params.get("bb_mid_exit", False)),
+            **_live_filters,
         }
     if strategy == "MACD_Cross":
         return {
@@ -842,6 +867,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "ema_trend":   params.get("trend_ema", 0),
             "tp_pct":      params.get("tp"),
             "sl_pct":      params.get("sl"),
+            **_live_filters,
         }
     if strategy == "Williams_R":
         return {
@@ -850,6 +876,7 @@ def _translate_params(strategy: str, params: dict) -> dict:
             "ema_period": params.get("trend_ema", 0),
             "tp_pct":    params.get("tp"),
             "sl_pct":    params.get("sl"),
+            **_live_filters,
         }
     return {}
 
@@ -858,15 +885,17 @@ _METRIC_KEYS = {"trades", "wr", "pf", "roi", "tpd", "max_dd", "approved"}
 
 
 def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None,
-                 timeframe: str = "5m") -> dict:
-    """Apply scanner result params to the matching live strategy instance.
+                 timeframe: str = "5m", profile_id: int = 1) -> dict:
+    """Apply scanner result params to the matching live strategy instance of
+    a given profile.
+
     - timeframe: 5m/15m/30m/1h — sempre vai no nome da instância dinâmica
     - tag opcional: cria versão nomeada `{prefix}_{asset}_{tf}_{tag_slug}`
     - sem tag: instância `{prefix}_{asset}_{tf}` (atualiza/sobrescreve esse TF)
     - Cria instância dinâmica se não houver registrada
-    - Salva params traduzidos (inclui timeframe) em strategy.{name}.params
-    - Salva métricas + raw scanner params em strategy.{name}.scanner_metrics (inclui tf e tag)
-    - Auto-ativa (enabled=true)
+    - Salva params traduzidos (inclui timeframe) em profile.<id>.strategy.{name}.params
+    - Salva métricas + raw scanner params em profile.<id>.strategy.{name}.scanner_metrics
+    - Auto-ativa (enabled=true) NO PERFIL
     """
     import json as _json
     from datetime import datetime, timezone
@@ -876,7 +905,7 @@ def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None
     asset_u = asset.upper()
     if timeframe not in SUPPORTED_TIMEFRAMES:
         return {"error": f"Timeframe inválido: {timeframe}"}
-    log.info(f"[scanner] apply_result chamado: strategy={strategy!r} asset={asset_u!r} tf={timeframe} tag={tag!r}")
+    log.info(f"[scanner] apply_result chamado: profile={profile_id} strategy={strategy!r} asset={asset_u!r} tf={timeframe} tag={tag!r}")
     # Sempre cria/atualiza instância dinâmica com TF no nome.
     # Legado: instâncias hardcoded sem TF (bb_stoch_btc, etc) NÃO são tocadas — novos applies criam bb_stoch_btc_5m.
     instance = manager.register_dynamic_instance(strategy, asset_u, tag=tag, timeframe=timeframe)
@@ -891,7 +920,7 @@ def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None
     translated["assets"] = [asset_u]
     translated["timeframe"] = timeframe   # estratégia live usa esse param para escolher o df
 
-    existing = db.get_strategy_config(instance)
+    existing = db.get_strategy_config(instance, profile_id=profile_id)
     merged = {**(existing.get("params") or {}), **translated}
 
     # Separa métricas dos params raw do scanner (para exibir no card)
@@ -911,12 +940,12 @@ def apply_result(asset: str, strategy: str, params: dict, tag: str | None = None
         "max_dd":         params.get("max_dd"),
     }
 
-    db.set_configs({
+    db.set_profile_configs(profile_id, {
         f"strategy.{instance}.params":          _json.dumps(merged),
         f"strategy.{instance}.scanner_metrics": _json.dumps(scanner_metrics),
         f"strategy.{instance}.enabled":         "true",
     })
-    log.info(f"[scanner] Aplicado {strategy}/{asset_u} → {instance} (auto-enabled)")
+    log.info(f"[scanner] Aplicado profile={profile_id} {strategy}/{asset_u} → {instance} (auto-enabled)")
     return {"ok": True, "instance": instance, "params": translated, "metrics": scanner_metrics}
 
 

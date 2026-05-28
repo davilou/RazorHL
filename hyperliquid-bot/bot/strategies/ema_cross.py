@@ -22,6 +22,7 @@ import pandas_ta as ta
 
 from bot.logger import get_logger
 from bot.strategies.base import BaseStrategy, select_tf_df
+from bot.strategies.live_filters import apply_live_filters
 
 log = get_logger("strategies.ema_cross")
 
@@ -40,6 +41,18 @@ class EMACrossStrategy(BaseStrategy):
         "use_atr_sl": False,
         "atr_period": 14,
         "atr_mult":   1.0,
+        # ── Live filters (scanner v2) — defaults = off ──
+        # NB: atr_period acima já existe (compartilhado com use_atr_sl).
+        # atr_tp_mode aqui é independente — quando True, sobrescreve TANTO
+        # tp_pct quanto sl_pct (via apply_atr_tp_sl), tomando precedência
+        # sobre use_atr_sl que só mexe em SL.
+        "adx_period":    0,
+        "adx_min":       0,
+        "session_start": 0,
+        "session_end":   24,
+        "atr_tp_mode":   False,
+        "atr_tp_mult":   1.0,
+        "atr_sl_mult":   1.0,
         "assets":     [],
         "asset_overrides": {},
     }
@@ -59,7 +72,7 @@ class EMACrossStrategy(BaseStrategy):
     def evaluate(self, asset, indicators, funding_rate, cfg, params,
                  df_1m=None, df_5m=None, df_15m=None, df_30m=None, df_1h=None, **kwargs):
         p = self._resolve_params(asset, params)
-        tf, df = select_tf_df(p, kwargs,
+        tf, df = select_tf_df(p, kwargs, name=self.NAME, asset=asset,
                               df_5m=df_5m, df_15m=df_15m, df_30m=df_30m, df_1h=df_1h)
         if df is None:
             return None
@@ -136,6 +149,15 @@ class EMACrossStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "ema_fast": curr_fast, "ema_slow": curr_slow,
+            "ema_fast_prev": prev_fast, "ema_slow_prev": prev_slow,
+            "ema_trend": trend_val,
+            "atr": atr_sl_dist,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = prev_fast <= prev_slow and curr_fast > curr_slow
         short_trig = prev_fast >= prev_slow and curr_fast < curr_slow
@@ -169,10 +191,11 @@ class EMACrossStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }
             if atr_sl_dist is not None:
                 sig["atr_sl_dist"] = float(atr_sl_dist)
-            return sig
+            return apply_live_filters(p, df, sig, is_trend_strategy=True)
 
         # ── SHORT: fast crosses below slow ────────────────────────────
         if prev_fast >= prev_slow and curr_fast < curr_slow:
@@ -196,9 +219,10 @@ class EMACrossStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }
             if atr_sl_dist is not None:
                 sig["atr_sl_dist"] = float(atr_sl_dist)
-            return sig
+            return apply_live_filters(p, df, sig, is_trend_strategy=True)
 
         return None

@@ -19,6 +19,25 @@
       </svg>
       <span class="brand-text">RazorHL</span>
     </div>
+
+    <!-- Profile selector -->
+    <div class="profile-selector" id="profileSelector">
+      <button type="button" class="profile-current" id="profileCurrentBtn" aria-haspopup="true" aria-expanded="false">
+        <span class="profile-status-dot" id="profileStatusDot"></span>
+        <span class="profile-current-name" id="profileCurrentName">…</span>
+        <span class="caret">▾</span>
+      </button>
+      <div class="profile-menu" id="profileMenu" hidden>
+        <ul class="profile-list" id="profileList"></ul>
+        <div class="profile-actions">
+          <button type="button" data-action="rename">✎ Renomear perfil ativo</button>
+          <button type="button" data-action="edit-creds">⚙ Editar credenciais</button>
+          <button type="button" data-action="delete">🗑 Excluir perfil ativo</button>
+          <button type="button" data-action="new">+ Novo perfil</button>
+        </div>
+      </div>
+    </div>
+
     <ul class="nav-list">
       <li>
         <a href="/" class="nav-link {% if page == 'overview' %}active{% endif %}" aria-current="{% if page == 'overview' %}page{% endif %}">
@@ -57,6 +76,12 @@
         </a>
       </li>
       <li>
+        <a href="/scanner_v2" class="nav-link {% if page == 'scanner_v2' %}active{% endif %}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M3 3v18h18"/><path d="M7 17l4-4 4 4 5-5"/><circle cx="11" cy="11" r="2"/></svg>
+          <span>Scanner v2</span>
+        </a>
+      </li>
+      <li>
         <a href="/ativos" class="nav-link {% if page == 'ativos' %}active{% endif %}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>Ativos</span>
@@ -72,6 +97,12 @@
         <a href="/strategies" class="nav-link {% if page == 'strategies' %}active{% endif %}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           <span>Estrat&eacute;gias</span>
+        </a>
+      </li>
+      <li>
+        <a href="/fidelity" class="nav-link {% if page == 'fidelity' %}active{% endif %}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M3 12l4-4 4 4 7-7"/><path d="M14 5h6v6"/></svg>
+          <span>Fidelidade</span>
         </a>
       </li>
       <li>
@@ -93,6 +124,66 @@
   <main class="main-content">
     {% block content %}{% endblock %}
   </main>
+
+  <!-- Profile modal (create/rename/edit-credentials) -->
+  <div class="modal-backdrop" id="profileModalBackdrop" hidden>
+    <div class="modal" id="profileModal" role="dialog" aria-labelledby="profileModalTitle">
+      <button type="button" class="modal-close" data-close aria-label="Fechar">×</button>
+      <h3 id="profileModalTitle">Novo perfil</h3>
+      <form id="profileForm" autocomplete="off">
+        <label>Nome
+          <input name="name" type="text" required>
+        </label>
+        <label>Exchange
+          <select name="exchange">
+            <option value="lighter">Lighter</option>
+            <option value="hyperliquid">Hyperliquid</option>
+          </select>
+        </label>
+        <fieldset class="creds creds-lighter">
+          <legend>Lighter</legend>
+          <label class="cred-row">Wallet Address
+            <span class="cred-input-wrap">
+              <input name="lighter_wallet_address" type="text">
+              <button type="button" class="cred-clear" data-clear="lighter_wallet_address" title="Limpar">×</button>
+            </span>
+          </label>
+          <label class="cred-row">Public Key
+            <span class="cred-input-wrap">
+              <input name="lighter_public_key" type="password">
+              <button type="button" class="cred-clear" data-clear="lighter_public_key" title="Limpar">×</button>
+            </span>
+          </label>
+          <label class="cred-row">Private Key
+            <span class="cred-input-wrap">
+              <input name="lighter_private_key" type="password">
+              <button type="button" class="cred-clear" data-clear="lighter_private_key" title="Limpar">×</button>
+            </span>
+          </label>
+          <small style="color:#94a3b8;display:block;margin-top:4px;">Em branco = manter atual. Clique × para apagar.</small>
+        </fieldset>
+        <fieldset class="creds creds-hl" hidden>
+          <legend>Hyperliquid</legend>
+          <label class="cred-row">Address
+            <span class="cred-input-wrap">
+              <input name="hyperliquid_address" type="text">
+              <button type="button" class="cred-clear" data-clear="hyperliquid_address" title="Limpar">×</button>
+            </span>
+          </label>
+          <label class="cred-row">Secret
+            <span class="cred-input-wrap">
+              <input name="hyperliquid_secret" type="password">
+              <button type="button" class="cred-clear" data-clear="hyperliquid_secret" title="Limpar">×</button>
+            </span>
+          </label>
+        </fieldset>
+        <div class="modal-actions">
+          <button type="button" data-close>Cancelar</button>
+          <button type="submit">Salvar</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>

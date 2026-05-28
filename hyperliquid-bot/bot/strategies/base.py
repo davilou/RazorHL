@@ -7,13 +7,16 @@ from bot import db
 SUPPORTED_TFS = ("5m", "15m", "30m", "1h")
 
 
-def select_tf_df(p: dict, kwargs: dict, *, df_5m=None, df_15m=None, df_30m=None, df_1h=None):
+def select_tf_df(p: dict, kwargs: dict, *,
+                 name: str | None = None, asset: str | None = None,
+                 df_5m=None, df_15m=None, df_30m=None, df_1h=None):
     """Helper para estratégias multi-TF.
 
     Lê `p['timeframe']` (default '5m'), confere o trigger `new_{tf}` em kwargs e
     retorna (tf, df) — o df correspondente ao TF. Se não for candle close do TF
     da estratégia (ou se o df estiver ausente), retorna (tf, None) e o evaluate
-    deve sair cedo.
+    deve sair cedo. `name` e `asset` são aceitos mas não-usados (placeholder
+    para logging futuro).
     """
     tf = p.get("timeframe", "5m")
     if tf not in SUPPORTED_TFS:
@@ -29,6 +32,29 @@ class BaseStrategy(ABC):
     DISPLAY_NAME: str = ""
     DEFAULT_PARAMS: dict = {}
     REQUIRED_TIMEFRAMES: list[str] = ["5m"]
+
+    @staticmethod
+    def _make_indicators_snapshot(values: dict) -> str:
+        """Serialize an indicator snapshot to JSON for the fidelity checker.
+
+        Filters None/NaN/inf values; rounds floats to 6 decimals to keep the
+        payload small and reproducible across re-runs of the backtest engine.
+        """
+        import json
+        import math
+        clean: dict = {}
+        for k, v in values.items():
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                clean[k] = v
+                continue
+            if math.isnan(fv) or math.isinf(fv):
+                continue
+            clean[k] = round(fv, 6)
+        return json.dumps(clean)
 
     def _insert_fee_block_signal(self, base, asset, indicators, tp_mult, fee_rate, side):
         atr_pct = indicators["atr"] / indicators["close_1m"]

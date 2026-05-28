@@ -19,6 +19,7 @@ import pandas_ta as ta
 
 from bot.logger import get_logger
 from bot.strategies.base import BaseStrategy, select_tf_df
+from bot.strategies.live_filters import apply_live_filters
 
 log = get_logger("strategies.stoch_scalp")
 
@@ -35,6 +36,15 @@ class StochScalpStrategy(BaseStrategy):
         "tp_pct":     0.5,
         "sl_pct":     0.8,
         "ema_period": 50,
+        # ── Live filters (scanner v2) — defaults = off ──
+        "adx_period":    0,
+        "adx_min":       0,
+        "session_start": 0,
+        "session_end":   24,
+        "atr_tp_mode":   False,
+        "atr_tp_mult":   1.0,
+        "atr_sl_mult":   1.0,
+        "atr_period":    14,
         "assets":     [],
         "asset_overrides": {},
     }
@@ -54,7 +64,7 @@ class StochScalpStrategy(BaseStrategy):
     def evaluate(self, asset, indicators, funding_rate, cfg, params,
                  df_1m=None, df_5m=None, df_15m=None, df_30m=None, df_1h=None, **kwargs):
         p = self._resolve_params(asset, params)
-        tf, df = select_tf_df(p, kwargs,
+        tf, df = select_tf_df(p, kwargs, name=self.NAME, asset=asset,
                               df_5m=df_5m, df_15m=df_15m, df_30m=df_30m, df_1h=df_1h)
         if df is None:
             return None
@@ -122,6 +132,14 @@ class StochScalpStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "stoch_k": curr_k, "stoch_d": curr_d,
+            "stoch_k_prev": prev_k, "stoch_d_prev": prev_d,
+            "ema": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = prev_k < stoch_os and prev_d < stoch_os and curr_k > curr_d and prev_k <= prev_d
         short_trig = prev_k > stoch_ob and prev_d > stoch_ob and curr_k < curr_d and prev_k >= prev_d
@@ -147,7 +165,7 @@ class StochScalpStrategy(BaseStrategy):
                 f"prevD={prev_d:.1f} currD={curr_d:.1f} "
                 f"os={stoch_os:.0f} tp={tp_pct:.3%} sl={sl_pct:.3%}"
             )
-            return {
+            return apply_live_filters(p, df, {
                 **base,
                 "side": "long",
                 "signal_price": close_curr,
@@ -155,7 +173,8 @@ class StochScalpStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
-            }
+                "indicators_json": indicators_json,
+            }, is_trend_strategy=False)
 
         # ── SHORT: both K and D were overbought, K crosses below D ───
         if prev_k > stoch_ob and prev_d > stoch_ob and curr_k < curr_d and prev_k >= prev_d:
@@ -171,7 +190,7 @@ class StochScalpStrategy(BaseStrategy):
                 f"prevD={prev_d:.1f} currD={curr_d:.1f} "
                 f"ob={stoch_ob:.0f} tp={tp_pct:.3%} sl={sl_pct:.3%}"
             )
-            return {
+            return apply_live_filters(p, df, {
                 **base,
                 "side": "short",
                 "signal_price": close_curr,
@@ -179,6 +198,7 @@ class StochScalpStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
-            }
+                "indicators_json": indicators_json,
+            }, is_trend_strategy=False)
 
         return None

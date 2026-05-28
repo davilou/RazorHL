@@ -20,16 +20,24 @@ log = get_logger("executor")
 # 5m close) can't both pass the "no open position" check and both insert
 # a trade — the duplicate-trade bug. Within the lock we re-check the DB
 # for an open trade in this asset and abort if one was just inserted.
-_open_locks: dict[str, threading.Lock] = {}
+_open_locks: dict[tuple[int, str], threading.Lock] = {}
 _open_locks_guard = threading.Lock()
 
 
-def _get_asset_lock(asset: str) -> threading.Lock:
+def _get_asset_lock(profile_id: int, asset: str) -> threading.Lock:
+    """Return a lock keyed by (profile_id, asset).
+
+    Two profiles can open the same asset in the same candle close without
+    blocking each other (their accounts and positions are independent), but
+    two workers trying to open the same asset for the SAME profile race for
+    the lock and only one wins.
+    """
     with _open_locks_guard:
-        lock = _open_locks.get(asset)
+        key = (profile_id, asset)
+        lock = _open_locks.get(key)
         if lock is None:
             lock = threading.Lock()
-            _open_locks[asset] = lock
+            _open_locks[key] = lock
         return lock
 
 
@@ -69,7 +77,8 @@ def round_price(price: float, sz_decimals: int) -> float:
     return round(sig5, max_dec)
 
 
-def open_position(client: BaseExchangeClient, signal: dict, size_usd: float, cfg: dict) -> int | None:
+def open_position(client: BaseExchangeClient, signal: dict, size_usd: float, cfg: dict,
+                  *, profile_id: int = 1) -> int | None:
     """
     Execute a market order for the given signal.
     Places TP and SL as trigger orders.
@@ -90,14 +99,14 @@ def open_position(client: BaseExchangeClient, signal: dict, size_usd: float, cfg
     sl_mult = float(signal.get("sl_atr_multiplier") or cfg.get("sl_atr_multiplier", 1.0))
     slippage = float(cfg.get("slippage", 0.005))
 
-    lock = _get_asset_lock(asset)
+    lock = _get_asset_lock(profile_id, asset)
     if not lock.acquire(blocking=False):
         log.warning(f"[{asset}] open_position already in progress on another thread — skipping duplicate")
         return None
 
     try:
         # Re-check inside the lock — another worker may have just inserted a trade for this asset.
-        if any(t["asset"] == asset for t in db.get_open_trades()):
+        if any(t["asset"] == asset for t in db.get_open_trades(profile_id=profile_id)):
             log.warning(f"[{asset}] open_position aborted — open trade already exists for this asset")
             return None
 
@@ -218,6 +227,7 @@ def open_position(client: BaseExchangeClient, signal: dict, size_usd: float, cfg
         # Record trade in DB
         now = datetime.now(timezone.utc).isoformat()
         trade_id = db.insert_trade({
+            "profile_id": profile_id,
             "asset": asset,
             "side": side,
             "entry_price": avg_px,
@@ -239,6 +249,7 @@ def open_position(client: BaseExchangeClient, signal: dict, size_usd: float, cfg
 
         # Mark signal as executed
         signal["executed"] = 1
+        signal["profile_id"] = profile_id
         db.insert_signal(signal)
 
         return trade_id
@@ -265,7 +276,8 @@ def _get_close_pnl_fallback(client: BaseExchangeClient, asset: str, since_ms: in
     return {"fee": 0.0, "closedPnl": 0.0}
 
 
-def close_position(client: BaseExchangeClient, asset: str, trade_id: int):
+def close_position(client: BaseExchangeClient, asset: str, trade_id: int,
+                   *, profile_id: int = 1):
     """Close a position at market price and update the trade record."""
     try:
         pre_close_ms = int(_time.time() * 1000)
@@ -286,7 +298,7 @@ def close_position(client: BaseExchangeClient, asset: str, trade_id: int):
             close_oid = str(filled.get("oid", ""))
 
         # Get the trade to compute PnL
-        trades = db.get_open_trades()
+        trades = db.get_open_trades(profile_id=profile_id)
         trade = next((t for t in trades if t["id"] == trade_id), None)
         if trade:
             entry_px = trade["entry_price"]
@@ -301,10 +313,16 @@ def close_position(client: BaseExchangeClient, asset: str, trade_id: int):
             open_data = _get_fill_data(client, asset, stored_oid, since_ms) if stored_oid else {"fee": 0.0, "closedPnl": 0.0}
             close_data = _get_fill_data(client, asset, close_oid, since_ms) if close_oid else {"fee": 0.0, "closedPnl": 0.0}
 
-            # Fallback: se o oid não casou (ex: Lighter usa tradeId mas market_close retorna txHash),
-            # busca fills desde imediatamente antes do close e soma o PnL
+            # Fallback: se o oid não casou (ex: Lighter usa tradeId mas market_close
+            # retorna txHash), soma o closedPnl de todos os fills da janela do trade
+            # (entry → close). Janela ampla é necessária porque o fill na Lighter
+            # pode ter ts segundos ANTES do `pre_close_ms` (matching engine time,
+            # não o instante em que o bot detectou o close — caso real: bb_mid_exit
+            # disparou às 21:20:43 mas o fill já existia na Lighter desde 21:20:23,
+            # antes da janela `pre_close_ms - 5s`). O fill de OPEN tem closedPnl=0
+            # na Lighter, então somar não distorce.
             if close_data["closedPnl"] == 0.0 and close_data["fee"] == 0.0:
-                close_data = _get_close_pnl_fallback(client, asset, pre_close_ms - 5_000)
+                close_data = _get_close_pnl_fallback(client, asset, since_ms)
 
             total_fees = open_data["fee"] + close_data["fee"]
 

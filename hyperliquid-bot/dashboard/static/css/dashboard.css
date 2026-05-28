@@ -593,3 +593,201 @@ input:focus, select:focus {
 }
 .filter-btn:hover { border-color: var(--accent-blue-light); color: var(--text-primary); }
 .filter-btn.active { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; }
+
+/* ── Profile selector ──────────────────────────────────────────── */
+.profile-selector {
+  position: relative;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.profile-current {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border-light);
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+.profile-current:hover { background: var(--bg-card-hover); border-color: var(--accent-blue); }
+.profile-current-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-current .caret { color: var(--text-secondary, #94a3b8); font-size: 11px; }
+.profile-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-secondary, #64748b);
+  display: inline-block;
+  flex-shrink: 0;
+}
+.profile-status-dot.running { background: var(--accent-green); box-shadow: 0 0 6px var(--accent-green); }
+.profile-status-dot.paused  { background: var(--accent-yellow); box-shadow: 0 0 6px var(--accent-yellow); }
+.profile-status-dot.stopped { background: #64748b; }
+.profile-status-dot.error   { background: var(--accent-red); }
+
+.profile-menu {
+  position: absolute;
+  top: calc(100% - 4px);
+  left: 14px;
+  right: 14px;
+  z-index: 200;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  margin-top: 6px;
+  padding: 4px 0;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+.profile-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.profile-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.profile-list li:hover { background: var(--bg-card-hover); }
+.profile-list li.active { color: var(--accent-blue-light); font-weight: 600; }
+.profile-actions { border-top: 1px solid var(--border); padding: 4px 0; }
+.profile-actions button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text-primary);
+  border: 0;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+.profile-actions button:hover { background: var(--bg-card-hover); color: var(--accent-cyan); }
+.profile-actions button[data-action="delete"]:hover { color: var(--accent-red); }
+
+/* ── Profile modal ─────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+/* Author CSS `display: flex` was overriding the UA's [hidden]→display:none
+   rule, so setting back.hidden=true wasn't actually closing the modal. */
+.modal-backdrop[hidden] { display: none !important; }
+.modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 22px 24px;
+  min-width: 380px;
+  max-width: 90vw;
+  color: var(--text-primary);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+}
+.modal h3 { margin: 0 0 14px; font-size: 16px; padding-right: 32px; }
+.modal .modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: transparent;
+  color: var(--text-secondary, #94a3b8);
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.modal .modal-close:hover { background: var(--bg-card-hover); color: var(--accent-red); }
+.modal { position: relative; }
+.modal label {
+  display: block;
+  margin: 10px 0;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 12px;
+}
+.modal input,
+.modal select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 7px 9px;
+  font-family: inherit;
+  font-size: 13px;
+}
+.modal input:focus, .modal select:focus { outline: none; border-color: var(--accent-blue); }
+.modal fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px 12px;
+  margin: 12px 0;
+}
+.modal legend { color: var(--accent-cyan); padding: 0 6px; font-size: 12px; font-weight: 600; }
+.modal .modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+.modal .modal-actions button {
+  padding: 7px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+}
+.modal .modal-actions button[type="submit"] {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
+.modal .modal-actions button:hover { background: var(--bg-card-hover); }
+.modal .modal-actions button[type="submit"]:hover { background: var(--accent-blue-light); }
+
+.modal .cred-row .cred-input-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-top: 4px;
+}
+.modal .cred-row .cred-input-wrap input { flex: 1; margin-top: 0; }
+.modal .cred-clear {
+  background: var(--bg-secondary);
+  color: var(--text-secondary, #94a3b8);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.modal .cred-clear:hover { background: var(--accent-red); color: #fff; border-color: var(--accent-red); }
+.modal .cred-clear.armed {
+  background: var(--accent-red);
+  color: #fff;
+  border-color: var(--accent-red);
+}
+.modal .cred-input-wrap input.armed-clear {
+  background: rgba(239, 68, 68, 0.10);
+  border-color: var(--accent-red);
+  text-decoration: line-through;
+  color: var(--text-secondary);
+}

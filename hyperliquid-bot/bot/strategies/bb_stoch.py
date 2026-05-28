@@ -39,6 +39,7 @@ import pandas_ta as ta
 from bot.logger import get_logger
 from bot import db
 from bot.strategies.base import BaseStrategy, select_tf_df
+from bot.strategies.live_filters import apply_live_filters
 
 log = get_logger("strategies.bb_stoch")
 
@@ -61,6 +62,15 @@ class BBStochStrategy(BaseStrategy):
         "ema_period":  0,
         "bbp_long_threshold":  0.1,
         "bbp_short_threshold": 0.9,
+        # ── Live filters (scanner v2) — defaults = off ──
+        "adx_period":    0,
+        "adx_min":       0,
+        "session_start": 0,
+        "session_end":   24,
+        "atr_tp_mode":   False,
+        "atr_tp_mult":   1.0,
+        "atr_sl_mult":   1.0,
+        "atr_period":    14,
         "assets":      [],
         "asset_overrides": {},
     }
@@ -80,7 +90,7 @@ class BBStochStrategy(BaseStrategy):
     def evaluate(self, asset, indicators, funding_rate, cfg, params,
                  df_1m=None, df_5m=None, df_15m=None, df_30m=None, df_1h=None, **kwargs):
         p = self._resolve_params(asset, params)
-        tf, df = select_tf_df(p, kwargs,
+        tf, df = select_tf_df(p, kwargs, name=self.NAME, asset=asset,
                               df_5m=df_5m, df_15m=df_15m, df_30m=df_30m, df_1h=df_1h)
         if df is None:
             return None
@@ -167,6 +177,15 @@ class BBStochStrategy(BaseStrategy):
         band_range_curr = bbu_curr - bbl_curr + 1e-9
         bbp_curr = (close_curr - bbl_curr) / band_range_curr
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "bbu": bbu_curr, "bbl": bbl_curr, "bbm": bbm_curr,
+            "bbp": bbp_curr,
+            "stoch_k": stk_curr, "stoch_d": std_curr,
+            "ema": ema_val,
+        })
+
         # ── Entry triggers (replicar lógica do scan) ──────────────────
         long_bb  = bbp_curr < bbp_long_threshold
         short_bb = bbp_curr > bbp_short_threshold
@@ -197,7 +216,7 @@ class BBStochStrategy(BaseStrategy):
                 f"close={close_curr:.2f} BBL={bbl_curr:.2f} BBM={bbm_curr:.2f} "
                 f"StochK={stk_curr:.1f} StochD={std_curr:.1f}"
             )
-            return {
+            return apply_live_filters(p, df, {
                 **base,
                 "side": "long",
                 "signal_price": close_curr,
@@ -205,7 +224,8 @@ class BBStochStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
-            }
+                "indicators_json": indicators_json,
+            }, is_trend_strategy=False)
 
         # ── SHORT ─────────────────────────────────────────────────────
         if short_bb and short_stoch:
@@ -219,7 +239,7 @@ class BBStochStrategy(BaseStrategy):
                 f"close={close_curr:.2f} BBU={bbu_curr:.2f} BBM={bbm_curr:.2f} "
                 f"StochK={stk_curr:.1f} StochD={std_curr:.1f}"
             )
-            return {
+            return apply_live_filters(p, df, {
                 **base,
                 "side": "short",
                 "signal_price": close_curr,
@@ -227,6 +247,7 @@ class BBStochStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
-            }
+                "indicators_json": indicators_json,
+            }, is_trend_strategy=False)
 
         return None

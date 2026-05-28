@@ -116,7 +116,8 @@ def size_to_int(size: float, decimals: int) -> int:
 
 class LighterExchangeClient(BaseExchangeClient):
 
-    def __init__(self):
+    def __init__(self, profile_id: int = 1):
+        self._profile_id = profile_id
         self._wallet_address: str = ""
         self._public_key: str = ""
         self._private_key: str = ""
@@ -127,7 +128,12 @@ class LighterExchangeClient(BaseExchangeClient):
         self._auth_token: str = ""
         self._auth_token_expiry: float = 0.0
         self._initialized = False
-        self._client_order_counter = 0
+        # Counter precisa sobreviver a restart — se zera, COIs viram ambíguos
+        # entre sessões e o lookup em /accountInactiveOrders pode retornar
+        # status de uma tx antiga com mesmo coi. Persistido em SQLite por perfil
+        # (cada perfil tem seu próprio account_index na Lighter).
+        self._client_order_counter = db.get_lighter_coi_counter(profile_id=self._profile_id)
+        self._client_order_counter_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._candle_buffer: dict[tuple[str, str], pd.DataFrame] = {}
@@ -168,8 +174,16 @@ class LighterExchangeClient(BaseExchangeClient):
         return asyncio.run_coroutine_threadsafe(coro, self._get_loop()).result(30)
 
     def _next_client_order_index(self) -> int:
-        self._client_order_counter += 1
-        return self._client_order_counter
+        # Lock + persistência: o counter precisa ser monotônico ACROSS restarts
+        # para o lookup em /accountInactiveOrders por client_order_index não
+        # ficar ambíguo. Sem isso, o status real do cancel pode vir de uma tx
+        # antiga com mesmo coi (caso real: NEAR 2026-05-26 15:40 com coi=9
+        # reusado após restart, lookup retornou reason de outra tx).
+        with self._client_order_counter_lock:
+            self._client_order_counter += 1
+            n = self._client_order_counter
+            db.set_lighter_coi_counter(n, profile_id=self._profile_id)
+        return n
 
     def _ensure_auth_token(self) -> str:
         if time.time() > self._auth_token_expiry:
@@ -210,18 +224,45 @@ class LighterExchangeClient(BaseExchangeClient):
         log.info(f"Lighter initialized — account_index={self._account_index} api_key_index={api_key_index}")
 
     def connect(self) -> None:
-        cfg = db.get_all_config()
-        self._wallet_address = cfg.get("lighter_wallet_address", "")
-        self._public_key = cfg.get("lighter_public_key", "")
-        self._private_key = cfg.get("lighter_private_key", "")
+        """Resolve credentials for this client's profile_id and connect.
 
-        if not self._wallet_address or not self._public_key or not self._private_key:
-            raise ValueError("Missing Lighter credentials. Set lighter_wallet_address, lighter_public_key, lighter_private_key.")
+        Reads `lighter_wallet_address`, `lighter_public_key`, `lighter_private_key`
+        from the `profiles` row matching `self._profile_id`. Falls back to the
+        legacy global config keys ONLY when the profile row is empty (single-
+        profile installs that never edited credentials through the new
+        Profiles UI). This is what prevents two profiles from accidentally
+        signing orders against the same Lighter wallet.
+        """
+        profile = db.get_profile(self._profile_id) or {}
+        self._wallet_address = profile.get("lighter_wallet_address") or ""
+        self._public_key    = profile.get("lighter_public_key")    or ""
+        self._private_key   = profile.get("lighter_private_key")   or ""
+
+        if not (self._wallet_address and self._public_key and self._private_key):
+            # Fall back to legacy global config (pre-multi-profile installs).
+            # Only the Default profile (id=1) is allowed to use this path —
+            # any other profile MUST have its credentials on its row.
+            if self._profile_id != 1:
+                raise ValueError(
+                    f"Missing Lighter credentials on profile {self._profile_id}. "
+                    f"Edit the profile in the dashboard to set "
+                    f"lighter_wallet_address / lighter_public_key / lighter_private_key."
+                )
+            cfg = db.get_all_config()
+            self._wallet_address = self._wallet_address or cfg.get("lighter_wallet_address", "")
+            self._public_key    = self._public_key    or cfg.get("lighter_public_key", "")
+            self._private_key   = self._private_key   or cfg.get("lighter_private_key", "")
+
+        if not (self._wallet_address and self._public_key and self._private_key):
+            raise ValueError(
+                f"Missing Lighter credentials for profile {self._profile_id}. "
+                "Set lighter_wallet_address, lighter_public_key, lighter_private_key."
+            )
 
         self._client = LighterClient(user_label=self._wallet_address[:10])
         self._initialized = False
         self._ensure_init()
-        log.info(f"Connected to Lighter — wallet {self._wallet_address[:10]}...")
+        log.info(f"Connected to Lighter (profile {self._profile_id}) — wallet {self._wallet_address[:10]}...")
 
     def disconnect(self) -> None:
         self._initialized = False
@@ -295,7 +336,7 @@ class LighterExchangeClient(BaseExchangeClient):
             before = len(fresh)
             fresh = _drop_open_candle(fresh, interval)
             if before and len(fresh) < before:
-                log.debug(f"[{asset}] dropped open {interval} candle ({before}→{len(fresh)})")
+                log.debug(f"[{asset}] dropped open {interval} candle ({before} -> {len(fresh)})")
 
             if is_warm:
                 merged = pd.concat([cached, fresh])
