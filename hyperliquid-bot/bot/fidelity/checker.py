@@ -136,3 +136,106 @@ def diff_signals(live_signals: list[dict], bt_signals: list[dict],
             out["matched"] += 1
 
     return out
+
+
+def diff_trades(live_trades: list[dict], bt_trades: list[dict],
+                tf_ms: int, price_tol: float = PRICE_TOL) -> dict:
+    """Match live trades to backtest trades by entry_ts proximity (±1 candle).
+
+    Each live trade dict must include: entry_ts_ms, side, entry_price,
+        exit_price, exit_type (may be None), pnl.
+    Each bt trade dict must include: entry_ts_ms, side, entry_price,
+        exit_price, exit_type, duration_candles.
+
+    Returns counters + list of diff dicts.
+    """
+    out: dict = {
+        "matched": 0, "extra_live": 0, "missed_trade": 0,
+        "entry_px_drift": 0, "exit_px_drift": 0,
+        "exit_type_mismatch": 0, "duration_drift": 0,
+        "diffs": [],
+    }
+
+    used_bt: set[int] = set()
+    bt_sorted = sorted(enumerate(bt_trades), key=lambda x: x[1]["entry_ts_ms"])
+
+    for lt in live_trades:
+        target = lt["entry_ts_ms"]
+        best_idx = None
+        best_dt = None
+        for idx, b in bt_sorted:
+            if idx in used_bt:
+                continue
+            if b["side"] != lt["side"]:
+                continue
+            dt = abs(int(b["entry_ts_ms"]) - int(target))
+            if dt <= tf_ms and (best_dt is None or dt < best_dt):
+                best_idx, best_dt = idx, dt
+        if best_idx is None:
+            out["extra_live"] += 1
+            out["diffs"].append({
+                "layer": "trade", "diff_type": "extra_live",
+                "ts_ms": target, "side": lt["side"],
+                "live_json": json.dumps(lt, default=str),
+                "bt_json": None, "delta_pct": None, "notes": None,
+            })
+            continue
+
+        used_bt.add(best_idx)
+        b = bt_trades[best_idx]
+        any_drift = False
+
+        if b["entry_price"] > 0:
+            d = _rel(lt["entry_price"], b["entry_price"])
+            if d > price_tol:
+                out["entry_px_drift"] += 1
+                any_drift = True
+                out["diffs"].append({
+                    "layer": "trade", "diff_type": "entry_px",
+                    "ts_ms": target, "side": lt["side"],
+                    "live_json": json.dumps(lt, default=str),
+                    "bt_json": json.dumps(b, default=str),
+                    "delta_pct": d, "notes": None,
+                })
+
+        if b.get("exit_price") and lt.get("exit_price") and float(b["exit_price"]) > 0:
+            d = _rel(float(lt["exit_price"]), float(b["exit_price"]))
+            if d > price_tol:
+                out["exit_px_drift"] += 1
+                any_drift = True
+                out["diffs"].append({
+                    "layer": "trade", "diff_type": "exit_px",
+                    "ts_ms": target, "side": lt["side"],
+                    "live_json": json.dumps(lt, default=str),
+                    "bt_json": json.dumps(b, default=str),
+                    "delta_pct": d, "notes": None,
+                })
+
+        if lt.get("exit_type") and b.get("exit_type") and lt["exit_type"] != b["exit_type"]:
+            out["exit_type_mismatch"] += 1
+            any_drift = True
+            out["diffs"].append({
+                "layer": "trade", "diff_type": "exit_type",
+                "ts_ms": target, "side": lt["side"],
+                "live_json": json.dumps(lt, default=str),
+                "bt_json": json.dumps(b, default=str),
+                "delta_pct": None,
+                "notes": f"live={lt['exit_type']} bt={b['exit_type']}",
+            })
+
+        if not any_drift:
+            out["matched"] += 1
+
+    for idx, b in enumerate(bt_trades):
+        if idx in used_bt:
+            continue
+        out["missed_trade"] += 1
+        out["diffs"].append({
+            "layer": "trade", "diff_type": "missed_trade",
+            "ts_ms": b["entry_ts_ms"], "side": b["side"],
+            "live_json": None,
+            "bt_json": json.dumps(b, default=str),
+            "delta_pct": None, "notes": None,
+        })
+
+    return out
