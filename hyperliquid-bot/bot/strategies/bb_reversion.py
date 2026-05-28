@@ -154,6 +154,14 @@ class BBReversionStrategy(BaseStrategy):
             "profile_id": int(kwargs.get("profile_id", 1)),
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "bbp": bbp_prev, "bbm": bbm_curr,
+            "bbu": bbu_curr, "bbl": bbl_curr,
+            "rsi": rsi_val, "ema": ema_val,
+        })
+
         # ── Entry triggers ────────────────────────────────────────────
         long_trigger  = bbp_prev < bbp_long_threshold  and close_curr > bbl_curr and close_curr < bbm_curr
         short_trigger = bbp_prev > bbp_short_threshold and close_curr < bbu_curr and close_curr > bbm_curr
@@ -192,6 +200,7 @@ class BBReversionStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         # ── SHORT ─────────────────────────────────────────────────────
@@ -219,6 +228,7 @@ class BBReversionStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         return None

@@ -149,6 +149,15 @@ class EMACrossStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "ema_fast": curr_fast, "ema_slow": curr_slow,
+            "ema_fast_prev": prev_fast, "ema_slow_prev": prev_slow,
+            "ema_trend": trend_val,
+            "atr": atr_sl_dist,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = prev_fast <= prev_slow and curr_fast > curr_slow
         short_trig = prev_fast >= prev_slow and curr_fast < curr_slow
@@ -182,6 +191,7 @@ class EMACrossStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }
             if atr_sl_dist is not None:
                 sig["atr_sl_dist"] = float(atr_sl_dist)
@@ -209,6 +219,7 @@ class EMACrossStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }
             if atr_sl_dist is not None:
                 sig["atr_sl_dist"] = float(atr_sl_dist)

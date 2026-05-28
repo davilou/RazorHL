@@ -113,6 +113,13 @@ class WilliamsRStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "wr": curr_wr, "wr_prev": prev_wr,
+            "ema": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = prev_wr < wr_os and curr_wr >= wr_os
         short_trig = prev_wr > wr_ob and curr_wr <= wr_ob
@@ -141,6 +148,7 @@ class WilliamsRStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         # ── SHORT: %R exits overbought zone ──────────────────────────
@@ -160,6 +168,7 @@ class WilliamsRStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         return None

@@ -132,6 +132,14 @@ class StochScalpStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "stoch_k": curr_k, "stoch_d": curr_d,
+            "stoch_k_prev": prev_k, "stoch_d_prev": prev_d,
+            "ema": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = prev_k < stoch_os and prev_d < stoch_os and curr_k > curr_d and prev_k <= prev_d
         short_trig = prev_k > stoch_ob and prev_d > stoch_ob and curr_k < curr_d and prev_k >= prev_d
@@ -165,6 +173,7 @@ class StochScalpStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         # ── SHORT: both K and D were overbought, K crosses below D ───
@@ -189,6 +198,7 @@ class StochScalpStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         return None

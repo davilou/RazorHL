@@ -126,6 +126,14 @@ class MACDCrossStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "macd": curr_macd, "macd_signal": curr_sig,
+            "macd_prev": prev_macd, "macd_signal_prev": prev_sig,
+            "ema_trend": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = curr_macd > curr_sig and prev_macd <= prev_sig
         short_trig = curr_macd < curr_sig and prev_macd >= prev_sig
@@ -154,6 +162,7 @@ class MACDCrossStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=True)
 
         # ── SHORT: MACD crosses below signal ─────────────────────────
@@ -173,6 +182,7 @@ class MACDCrossStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=True)
 
         return None

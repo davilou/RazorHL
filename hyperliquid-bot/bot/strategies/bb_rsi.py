@@ -142,6 +142,13 @@ class BBRSIStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "bbp": bbp_curr, "bbu": bbu_curr, "bbl": bbl_curr,
+            "bbm": bbm_curr, "rsi": rsi_curr, "ema": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = bbp_curr < bbp_long_threshold and rsi_curr < rsi_os
         short_trig = bbp_curr > bbp_short_threshold and rsi_curr > rsi_ob
@@ -171,6 +178,7 @@ class BBRSIStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         # ── SHORT ────────────────────────────────────────────────────
@@ -190,6 +198,7 @@ class BBRSIStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": bbm_curr,
                 "bb_mid_exit": bb_mid_exit,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         return None

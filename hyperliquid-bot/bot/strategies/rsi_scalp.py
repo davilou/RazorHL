@@ -111,6 +111,13 @@ class RSIScalpStrategy(BaseStrategy):
             "strategy_name": self.NAME,
         }
 
+        # ── Indicators snapshot (para fidelity checker) ──────────────
+        indicators_json = self._make_indicators_snapshot({
+            "close": close_curr,
+            "rsi": curr_rsi, "rsi_prev": prev_rsi,
+            "ema": ema_val,
+        })
+
         # ── Diagnostic scan log (permanente) ──────────────────────────
         long_trig = prev_rsi < rsi_os and curr_rsi >= rsi_os
         short_trig = prev_rsi > rsi_ob and curr_rsi <= rsi_ob
@@ -139,6 +146,7 @@ class RSIScalpStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         # ── SHORT: RSI crosses out of overbought ─────────────────────
@@ -158,6 +166,7 @@ class RSIScalpStrategy(BaseStrategy):
                 "sl_pct": sl_pct,
                 "bb_mid": None,
                 "bb_mid_exit": False,
+                "indicators_json": indicators_json,
             }, is_trend_strategy=False)
 
         return None
