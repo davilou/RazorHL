@@ -343,6 +343,29 @@ def diff_metrics(live_metrics: dict, bt_metrics: dict,
 _TF_TO_MS = {"5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000}
 
 
+def _find_first_live_signal_ts(strategy: str, asset: str,
+                               profile_id: int) -> int | None:
+    """Earliest live signal ts_ms for this strategy/asset on this profile,
+    or None if the strategy never fired. Used to clamp the comparison
+    period — signals before the strategy was activated are not real
+    'missed' events."""
+    from datetime import datetime
+    from bot import db as bot_db
+    row = bot_db.get_conn().execute(
+        """
+        SELECT MIN(timestamp) AS ts FROM signals
+        WHERE strategy_name = ? AND asset = ? AND profile_id = ?
+        """,
+        (strategy, asset, profile_id),
+    ).fetchone()
+    if not row or not row["ts"]:
+        return None
+    try:
+        return int(datetime.fromisoformat(row["ts"]).timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def _load_live_signals(strategy: str, asset: str, profile_id: int,
                        start_ms: int, end_ms: int,
                        tf_ms: int = 300_000) -> list[dict]:
@@ -478,15 +501,29 @@ def run_check(strategy: str, asset: str, days: int,
     period_end_ms = now_ms - tf_ms                      # clamp to last closed candle
     period_start_ms = period_end_ms - days * 86_400_000
 
+    # Clamp period_start_ms forward to the first live signal of this
+    # strategy on this profile, when one exists. Without this clamp, every
+    # backtest signal before the strategy was actually activated shows up as
+    # a legit "missed" — but the strategy literally wasn't running, so it's
+    # noise that drowns the real divergences. If no live signal ever fired
+    # the start stays put (user sees the full "strategy never ran" picture).
+    first_live_ts = _find_first_live_signal_ts(resolved, asset, profile_id)
+    if first_live_ts is not None and first_live_ts > period_start_ms:
+        # Snap down to the candle boundary so backtest signals at the exact
+        # boundary aren't accidentally excluded by a small offset.
+        period_start_ms = (first_live_ts // tf_ms) * tf_ms
+
     # 1. Backtest with signals
     bt_result = bt_engine._run_backtest(
         resolved, asset, days,
         trade_size_usd=trade_size_usd, fee_rate=fee_rate,
         profile_id=profile_id, return_signals=True,
     )
-    bt_signals = bt_result.get("signals", [])
+    bt_signals = [s for s in bt_result.get("signals", [])
+                  if int(s["ts_ms"]) >= period_start_ms]
     bt_trades_raw = bt_result.get("trades", [])
-    bt_trades = [_normalize_bt_trade(t) for t in bt_trades_raw]
+    bt_trades = [_normalize_bt_trade(t) for t in bt_trades_raw
+                 if _normalize_bt_trade(t)["entry_ts_ms"] >= period_start_ms]
     bt_metrics = bt_result.get("metrics", {})
 
     # 2. Live snapshot — snap timestamps to candle boundary (tf_ms) so live
