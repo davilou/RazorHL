@@ -341,9 +341,18 @@ _TF_TO_MS = {"5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000}
 
 
 def _load_live_signals(strategy: str, asset: str, profile_id: int,
-                       start_ms: int, end_ms: int) -> list[dict]:
+                       start_ms: int, end_ms: int,
+                       tf_ms: int = 300_000) -> list[dict]:
     """Read live signals for the period and normalize to {ts_ms, side,
-    signal_price, indicators_json, reason, executed}."""
+    signal_price, indicators_json, reason, executed}.
+
+    `ts_ms` is **snapped to the floor of tf_ms** so it aligns with the candle
+    close boundary used by the backtest. Live signals are timestamped with
+    `datetime.now(utc)` at evaluate time, which lags the actual candle close
+    by dispatch latency (typically 0-90s on a 5m TF, more on higher TFs).
+    Without snapping, every live signal would appear as a phantom one candle
+    after its backtest twin would-be missed.
+    """
     from datetime import datetime
     from bot import db as bot_db
 
@@ -361,9 +370,11 @@ def _load_live_signals(strategy: str, asset: str, profile_id: int,
     out: list[dict] = []
     for r in rows:
         try:
-            ts_ms = int(datetime.fromisoformat(r["timestamp"]).timestamp() * 1000)
+            raw_ts_ms = int(datetime.fromisoformat(r["timestamp"]).timestamp() * 1000)
         except Exception:
             continue
+        # Snap to candle close boundary (floor)
+        ts_ms = (raw_ts_ms // tf_ms) * tf_ms
         if ts_ms < start_ms or ts_ms > end_ms:
             continue
         signal_price = None
@@ -375,6 +386,7 @@ def _load_live_signals(strategy: str, asset: str, profile_id: int,
                 pass
         out.append({
             "ts_ms": ts_ms,
+            "raw_ts_ms": raw_ts_ms,
             "side": r["side"],
             "signal_price": signal_price,
             "indicators_json": r["indicators_json"],
@@ -385,7 +397,8 @@ def _load_live_signals(strategy: str, asset: str, profile_id: int,
 
 
 def _load_live_trades(strategy: str, asset: str, profile_id: int,
-                      start_ms: int, end_ms: int) -> list[dict]:
+                      start_ms: int, end_ms: int,
+                      tf_ms: int = 300_000) -> list[dict]:
     from datetime import datetime
     from bot import db as bot_db
 
@@ -403,13 +416,17 @@ def _load_live_trades(strategy: str, asset: str, profile_id: int,
     out: list[dict] = []
     for r in rows:
         try:
-            entry_ts_ms = int(datetime.fromisoformat(r["entry_time"]).timestamp() * 1000)
+            raw_entry_ts_ms = int(datetime.fromisoformat(r["entry_time"]).timestamp() * 1000)
         except Exception:
             continue
+        # Snap to candle boundary so trade matches the bt simulation (which
+        # opens exactly at the candle close ts).
+        entry_ts_ms = (raw_entry_ts_ms // tf_ms) * tf_ms
         if entry_ts_ms < start_ms or entry_ts_ms > end_ms:
             continue
         out.append({
             "entry_ts_ms": entry_ts_ms,
+            "raw_entry_ts_ms": raw_entry_ts_ms,
             "side": r["side"],
             "entry_price": float(r["entry_price"]),
             "exit_price": float(r["exit_price"] or 0),
@@ -469,11 +486,14 @@ def run_check(strategy: str, asset: str, days: int,
     bt_trades = [_normalize_bt_trade(t) for t in bt_trades_raw]
     bt_metrics = bt_result.get("metrics", {})
 
-    # 2. Live snapshot
+    # 2. Live snapshot — snap timestamps to candle boundary (tf_ms) so live
+    # signals stamped with datetime.now() align with backtest's candle-close ts
     live_signals = _load_live_signals(resolved, asset, profile_id,
-                                      period_start_ms, period_end_ms)
+                                      period_start_ms, period_end_ms,
+                                      tf_ms=tf_ms)
     live_trades_raw = _load_live_trades(resolved, asset, profile_id,
-                                        period_start_ms, period_end_ms)
+                                        period_start_ms, period_end_ms,
+                                        tf_ms=tf_ms)
     live_metrics = compute_metrics(live_trades_raw, initial_capital=trade_size_usd)
 
     # 3. Tolerances from config (with defaults)
