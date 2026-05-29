@@ -456,13 +456,19 @@ def bot_loop(profile_id: int = 1):
     log.info(f"Bot stopped for profile {profile_id}.")
 
 
-def check_bb_mid_exit(asset: str, df_5m, profile_id: int = 1) -> None:
+def check_bb_mid_exit(asset: str, dfs: dict, profile_id: int = 1) -> None:
     """
     Check open bb_reversion and bb_stoch trades for BB midline exit.
     Called on every new 5m candle close.
     For LONG: exits when candle closes >= BB midline (price returned to centre).
     For SHORT: exits when candle closes <= BB midline.
     The exchange cancels TP/SL trigger orders automatically when position is closed.
+
+    `dfs` is a dict `{"5m": df_5m, "15m": df_15m, "30m": df_30m, "1h": df_1h}`
+    — esta função escolhe o df do TF da estratégia (de `params["timeframe"]`)
+    para computar a BB midline. **Não usa df_5m incondicionalmente** — esse era
+    o bug: pra estratégia 15m com bb_period=10, df_5m dava SMA(50min) em vez
+    de SMA(150min), fechando trades muito antes do BT.
     """
     client = _bot_clients.get(profile_id)
     if client is None:
@@ -476,35 +482,34 @@ def check_bb_mid_exit(asset: str, df_5m, profile_id: int = 1) -> None:
     if not bb_trades:
         return
 
-    close = float(df_5m["close"].iloc[-1])
-
     from bot.strategies.bb_reversion import BBReversionStrategy
     from bot.strategies.bb_stoch import BBStochStrategy
     from bot.strategies.manager import STRATEGY_MAP
 
-    _period_cache: dict[str, int] = {}
+    _cfg_cache: dict[str, tuple[int, str]] = {}
 
-    def _get_bb_period(strategy_name: str) -> int:
-        if strategy_name in _period_cache:
-            return _period_cache[strategy_name]
+    def _get_bb_period_and_tf(strategy_name: str) -> tuple[int, str]:
+        if strategy_name in _cfg_cache:
+            return _cfg_cache[strategy_name]
+        strategy = STRATEGY_MAP.get(strategy_name)
         if strategy_name.startswith("bb_reversion"):
-            strategy = STRATEGY_MAP.get(strategy_name)
             base_params = strategy.DEFAULT_PARAMS if strategy else BBReversionStrategy.DEFAULT_PARAMS
             cfg = db.get_strategy_config(strategy_name, profile_id=profile_id)
             params = {**base_params, **cfg["params"]}
             period = int(params.get("bb_period", 10))
+            tf = str(params.get("timeframe", "5m"))
         else:  # bb_stoch_*
-            strategy = STRATEGY_MAP.get(strategy_name)
             base_params = strategy.DEFAULT_PARAMS if strategy else BBStochStrategy.DEFAULT_PARAMS
             cfg = db.get_strategy_config(strategy_name, profile_id=profile_id)
             params = {**base_params, **cfg["params"]}
             _bme = params.get("bb_mid_exit", True)
             if str(_bme).lower() in ("false", "0", "no"):
-                _period_cache[strategy_name] = 0
-                return 0
+                _cfg_cache[strategy_name] = (0, "5m")
+                return 0, "5m"
             period = int(params.get("bb_period", 15))
-        _period_cache[strategy_name] = period
-        return period
+            tf = str(params.get("timeframe", "5m"))
+        _cfg_cache[strategy_name] = (period, tf)
+        return period, tf
 
     for trade in bb_trades:
         strategy_name = trade.get("strategy", "bb_reversion_btc")
@@ -519,11 +524,13 @@ def check_bb_mid_exit(asset: str, df_5m, profile_id: int = 1) -> None:
             if str(_bme).lower() in ("false", "0", "no"):
                 continue
 
-        bb_period = _get_bb_period(strategy_name)
-        if bb_period == 0 or len(df_5m) < bb_period:
+        bb_period, tf = _get_bb_period_and_tf(strategy_name)
+        df_tf = dfs.get(tf)
+        if df_tf is None or df_tf.empty or bb_period == 0 or len(df_tf) < bb_period:
             continue
 
-        bb_mid = float(df_5m["close"].rolling(bb_period).mean().iloc[-1])
+        close = float(df_tf["close"].iloc[-1])
+        bb_mid = float(df_tf["close"].rolling(bb_period).mean().iloc[-1])
         side = trade["side"]
         triggered = False
 
@@ -531,13 +538,13 @@ def check_bb_mid_exit(asset: str, df_5m, profile_id: int = 1) -> None:
             triggered = True
             log.info(
                 f"[{asset}] BB mid exit — LONG close={close:.4f} >= mid={bb_mid:.4f} "
-                f"(BB{bb_period} strategy={strategy_name})"
+                f"(BB{bb_period}@{tf} strategy={strategy_name})"
             )
         elif side == "short" and close <= bb_mid:
             triggered = True
             log.info(
                 f"[{asset}] BB mid exit — SHORT close={close:.4f} <= mid={bb_mid:.4f} "
-                f"(BB{bb_period} strategy={strategy_name})"
+                f"(BB{bb_period}@{tf} strategy={strategy_name})"
             )
 
         if triggered:
@@ -650,8 +657,14 @@ def process_asset(asset: str, cfg: dict,
 
     funding_rate = client.get_funding_rate(asset)
 
-    # BB mid exit check — always runs on 5m close
-    check_bb_mid_exit(asset, df_5m, profile_id=profile_id)
+    # BB mid exit check — always runs on 5m close. Passa todos os dfs pra
+    # que a função escolha o do TF da estratégia (df_15m pra estratégia 15m,
+    # etc.). Antes passava só df_5m, o que dava SMA(50min) em vez de SMA(150min)
+    # pra uma estratégia 15m com bb_period=10 — cortava trades muito antes do
+    # bb_mid teórico do BT, virando $1+ de win esperado em $0.05.
+    check_bb_mid_exit(asset, {
+        "5m": df_5m, "15m": df_15m, "30m": df_30m, "1h": df_1h,
+    }, profile_id=profile_id)
 
     # Evaluate signals
     signals = evaluate_all(
